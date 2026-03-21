@@ -62,7 +62,17 @@ T_TEXT={**T_LINES,"vertical_strategy":"text","horizontal_strategy":"text"}
 
 def parse_auto(pdf_path, settings, log_cb=None):
     wm=[k.strip() for k in settings["watermark_keywords"].split(",") if k.strip()]
-    all_tables=[]; strategy="lines"
+    skip_dup=settings.get("skip_duplicate_header",True)
+    strategy="lines"; all_rows=[]; header=None
+
+    def _is_wm(row):
+        txt=" ".join(row)
+        return any(k in txt for k in wm) if wm else False
+
+    def _is_hdr(row):
+        txt=" ".join(row)
+        return ("出貨單編號" in txt and "出貨日期" in txt) or                ("出貨日期" in txt and "星期" in txt and "位置" in txt)
+
     with pdfplumber.open(pdf_path) as pdf:
         if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（自動模式）")
         for pn,page in enumerate(pdf.pages,1):
@@ -72,10 +82,18 @@ def parse_auto(pdf_path, settings, log_cb=None):
                 tables=page.extract_tables(T_TEXT); strategy="text"
             else: strategy="lines"
             for t in (tables or []):
-                n=normalize(t)
-                if wm: n=[r for r in n if not any(k in " ".join(r) for k in wm)]
-                if n: all_tables.append(n)
-    return _merge_tables(all_tables, settings), strategy
+                for row in t:
+                    r=[clean(v) for v in row]
+                    if not any(r): continue
+                    if _is_wm(r): continue
+                    if _is_hdr(r):
+                        if header is None:
+                            header=r; all_rows.append(r)
+                        elif not skip_dup:
+                            all_rows.append(r)
+                        continue
+                    all_rows.append(r)
+    return all_rows, strategy
 
 # ══════════════════════════════════════════
 #  模式二：文字座標精準解析
