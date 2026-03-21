@@ -289,32 +289,45 @@ def write_excel(table, merge_info, out_path, col_map=None):
     e_fill=PatternFill(start_color="FFFFFF",end_color="FFFFFF",fill_type="solid")
     thin=Side(style="thin")
     bdr=Border(left=thin,right=thin,top=thin,bottom=thin)
-    ctr=Alignment(horizontal="center",vertical="center",wrap_text=True)
-    lwrap=Alignment(horizontal="left",vertical="center",wrap_text=True)
+    ctr=Alignment(horizontal="center",vertical="top",wrap_text=True)
+    lwrap=Alignment(horizontal="left",vertical="top",wrap_text=True)
     if not table: wb.save(out_path); return
     ncols=max(len(r) for r in table)
-    col_max=[10]*ncols
+
+    # 欄寬：取各欄最長內容（換行只算最長的一段），上限50
+    col_max=[12]*ncols
     for row in table:
-        for ci,v in enumerate(row): col_max[ci]=min(max(col_max[ci],len(str(v or ""))),45)
+        for ci,v in enumerate(row):
+            if v:
+                # 換行內容取最長一行來計算欄寬
+                max_line=max((len(line) for line in str(v).split("\n")),default=0)
+                col_max[ci]=min(max(col_max[ci], max_line), 50)
     for ci in range(ncols):
-        ws.column_dimensions[get_column_letter(ci+1)].width=col_max[ci]+4
+        ws.column_dimensions[get_column_letter(ci+1)].width=col_max[ci]+3
+
     drc=0
     for ri,row in enumerate(table):
         er=ri+1; is_hdr=(ri==0)
+        max_lines=1  # 這一列最多幾行
         for ci in range(ncols):
             val=row[ci] if ci<len(row) else ""
             if is_hdr and col_map and ci in col_map: val=col_map[ci]
+            # 保留換行符（\n → Excel 換行）
             cell=ws.cell(row=er,column=ci+1,value=val)
             cell.border=bdr
             cell.alignment=ctr if is_hdr else lwrap
-            if is_hdr: cell.fill=hfill; cell.font=hfont
-            else: cell.fill=o_fill if drc%2==0 else e_fill; cell.font=Font(size=10)
+            if is_hdr:
+                cell.fill=hfill; cell.font=hfont
+            else:
+                cell.fill=o_fill if drc%2==0 else e_fill
+                cell.font=Font(size=10)
+                if val: max_lines=max(max_lines, str(val).count("\n")+1)
         if not is_hdr:
-            note=row[-1] if row else ""
-            nl=str(note).count("\n")+1
-            ws.row_dimensions[er].height=max(16,15*nl)
+            # 列高：依最多換行數自動調整，每行約15pt，最少22，最多200
+            ws.row_dimensions[er].height=min(max(22, 15*max_lines), 200)
             drc+=1
-        else: ws.row_dimensions[er].height=22
+        else:
+            ws.row_dimensions[er].height=24
     ws.freeze_panes="A2"
     for ci,ranges in merge_info.items():
         for (si,ei) in ranges:
@@ -588,6 +601,8 @@ class PreviewWin(tk.Toplevel):
         s.configure("Treeview",background=CARD,foreground=TEXT,fieldbackground=CARD,font=("Segoe UI",9),rowheight=20)
         s.configure("Treeview.Heading",background=BG2,foreground=TEXT,font=("Segoe UI",9,"bold"))
         self._fill(preview)
+        self.tree.bind("<Double-1>",self._on_double_click)
+        tk.Label(tf,text="💡 雙擊儲存格可編輯內文",font=("Segoe UI",8),bg=BG,fg=TEXT2).grid(row=2,column=0,sticky="w",pady=(2,0))
 
         bf=tk.Frame(self,bg=BG); bf.pack(fill="x",padx=10,pady=(0,8))
         tk.Button(bf,text="🔄  套用欄位名稱",font=("Segoe UI",9),bg=CARD,fg=TEXT,relief="flat",cursor="hand2",padx=10,pady=4,command=self._apply).pack(side="left",padx=(0,6))
@@ -606,6 +621,47 @@ class PreviewWin(tk.Toplevel):
             self.tree.insert("","end",values=[str(v).replace("\n"," / ") for v in vals])
 
     def _apply(self): self._fill(self.table[:50])
+
+    def _on_double_click(self, event):
+        """雙擊儲存格可編輯內文"""
+        item=self.tree.focus()
+        if not item: return
+        col=self.tree.identify_column(event.x)
+        ci=int(col.replace("#",""))-1
+        # 找出這列在 table 中的索引（+1 因為標題在索引0）
+        items=self.tree.get_children()
+        ri=list(items).index(item)+1
+        if ri>=len(self.table): return
+        cur_val=self.table[ri][ci] if ci<len(self.table[ri]) else ""
+        # 彈出編輯視窗
+        self._edit_cell(item,col,ci,ri,cur_val)
+
+    def _edit_cell(self,item,col,ci,ri,cur_val):
+        win=tk.Toplevel(self); win.title("編輯儲存格")
+        win.geometry("480x280"); win.configure(bg=BG); win.grab_set()
+        col_name=self.table[0][ci] if ci<len(self.table[0]) else f"欄{ci+1}"
+        tk.Label(win,text=f"欄位：{col_name}",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w",padx=12,pady=(10,4))
+        tk.Label(win,text="（Ctrl+Enter 換行）",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",padx=12,pady=(0,4))
+        tf=tk.Frame(win,bg=CARD); tf.pack(fill="both",expand=True,padx=12,pady=(0,8))
+        txt=tk.Text(tf,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",
+                    font=("Segoe UI",10),wrap="word",height=8)
+        txt.pack(fill="both",expand=True,padx=4,pady=4)
+        txt.insert("1.0",cur_val.replace("\n","\n"))
+        txt.focus_set()
+        def _save():
+            new_val=txt.get("1.0","end-1c")
+            # 更新 table 資料
+            while len(self.table[ri])<ci+1: self.table[ri].append("")
+            self.table[ri][ci]=new_val
+            win.destroy()
+            self._fill(self.table[:50])
+        def _cancel(): win.destroy()
+        bf=tk.Frame(win,bg=BG); bf.pack(fill="x",padx=12,pady=(0,10))
+        tk.Button(bf,text="確定",font=("Segoe UI",10,"bold"),bg=ACCENT,fg="white",
+                  relief="flat",cursor="hand2",padx=14,pady=5,command=_save).pack(side="right")
+        tk.Button(bf,text="取消",font=("Segoe UI",9),bg=BG2,fg=TEXT2,
+                  relief="flat",cursor="hand2",padx=10,pady=5,command=_cancel).pack(side="right",padx=(0,6))
+        win.bind("<Return>",lambda e:_save())
 
     def save(self):
         out=filedialog.asksaveasfilename(title="另存 Excel",defaultextension=".xlsx",
