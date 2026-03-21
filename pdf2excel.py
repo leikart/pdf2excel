@@ -28,7 +28,7 @@ except ImportError:
     from openpyxl.utils import get_column_letter
     from openpyxl.cell.cell import MergedCell
 
-BG=="#1A1A2E"; BG2="#16213E"; CARD="#0F3460"; ACCENT="#E94560"
+BG="#1A1A2E"; BG2="#16213E"; CARD="#0F3460"; ACCENT="#E94560"
 ACCENT2="#533483"; TEXT="#EAEAEA"; TEXT2="#A0A8C0"
 SUCCESS="#4CAF82"; ERROR="#E94560"; WARNING="#F0A500"
 BG      = "#1A1A2E"
