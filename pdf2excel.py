@@ -1,16 +1,13 @@
 """
-PDF 轉 Excel 通用工具
-- 自動偵測表格（框線 / 文字對齊 雙策略）
-- 自動辨識標題列、去除重複標題
-- 合併儲存格（跟 PDF 一樣）
-- 多頁合併成單一工作表
-- 預覽 + 欄位名稱調整介面
-- 批次轉換 + 另存選項
+PDF 轉 Excel 通用工具 v3
+- 雙模式：自動表格偵測 / 文字座標精準解析
+- 進階設定：浮水印過濾、錨點欄、欄位邊界
+- 合併儲存格、多頁整合、重複標題刪除
+- 預覽 + 欄位名稱調整 + 另存選項
 """
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading, os, re
+import threading, os, re, json
 
 try:
     import pdfplumber
@@ -20,8 +17,7 @@ try:
     from openpyxl.cell.cell import MergedCell
 except ImportError:
     import subprocess, sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install",
-                           "pdfplumber", "openpyxl", "-q"])
+    subprocess.check_call([sys.executable,"-m","pip","install","pdfplumber","openpyxl","-q"])
     import pdfplumber
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -31,70 +27,176 @@ except ImportError:
 BG="#1A1A2E"; BG2="#16213E"; CARD="#0F3460"; ACCENT="#E94560"
 ACCENT2="#533483"; TEXT="#EAEAEA"; TEXT2="#A0A8C0"
 SUCCESS="#4CAF82"; ERROR="#E94560"; WARNING="#F0A500"
-BG      = "#1A1A2E"
-BG2     = "#16213E"
-CARD    = "#0F3460"
-ACCENT  = "#E94560"
-ACCENT2 = "#533483"
-TEXT    = "#EAEAEA"
-TEXT2   = "#A0A8C0"
-SUCCESS = "#4CAF82"
-ERROR   = "#E94560"
-WARNING = "#F0A500"
 
-TABLE_LINES = {
-    "vertical_strategy":"lines","horizontal_strategy":"lines",
-    "snap_tolerance":3,"join_tolerance":3,"edge_min_length":3,
-    "min_words_vertical":1,"min_words_horizontal":1,
-    "intersection_tolerance":3,"text_tolerance":3,
+# ══════════════════════════════════════════════
+#  設定檔（使用者可調整）
+# ══════════════════════════════════════════════
+DEFAULT_SETTINGS = {
+    "mode": "auto",           # auto / table / coords
+    "watermark_keywords": "", # 逗號分隔，含這些字的列跳過
+    "anchor_col": 0,          # 錨點欄索引（0開始），空白=續行
+    "skip_duplicate_header": True,
+    "col_bounds": "",         # 文字座標模式的欄界，逗號分隔數字
 }
-TABLE_TEXT = {**TABLE_LINES,"vertical_strategy":"text","horizontal_strategy":"text"}
 
 def clean(v):
     if v is None: return ""
     return re.sub(r"\s+"," ",str(v)).strip()
 
-def rows_equal(a,b):
+def rows_equal(a, b):
     ca=[clean(x) for x in (a or [])]
     cb=[clean(x) for x in (b or [])]
     return ca==cb and any(ca)
 
 def normalize(table):
-    out=[]
-    for row in table:
-        r=[clean(v) for v in row]
-        if any(r): out.append(r)
-    return out
+    return [[clean(v) for v in row] for row in table if any(clean(v) for v in row)]
 
-def parse_pdf(pdf_path, log_cb=None):
-    all_tables=[]; strategy_used="lines"
+# ── 模式一：自動表格偵測 ───────────────────────
+TABLE_LINES = {"vertical_strategy":"lines","horizontal_strategy":"lines",
+               "snap_tolerance":3,"join_tolerance":3,"edge_min_length":3,
+               "min_words_vertical":1,"min_words_horizontal":1,
+               "intersection_tolerance":3,"text_tolerance":3}
+TABLE_TEXT  = {**TABLE_LINES,"vertical_strategy":"text","horizontal_strategy":"text"}
+
+def parse_auto(pdf_path, settings, log_cb=None):
+    wm_keys = [k.strip() for k in settings["watermark_keywords"].split(",") if k.strip()]
+    all_tables=[]; strategy="lines"
     with pdfplumber.open(pdf_path) as pdf:
-        total=len(pdf.pages)
-        if log_cb: log_cb(f"  共 {total} 頁")
+        if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（自動模式）")
         for pn,page in enumerate(pdf.pages,1):
             if log_cb: log_cb(f"  解析第 {pn} 頁...")
             tables=page.extract_tables(TABLE_LINES)
             if not tables or not any(len(t)>1 for t in tables):
-                tables=page.extract_tables(TABLE_TEXT); strategy_used="text"
-            else:
-                strategy_used="lines"
+                tables=page.extract_tables(TABLE_TEXT); strategy="text"
+            else: strategy="lines"
             for t in (tables or []):
                 n=normalize(t)
+                # 過濾浮水印列
+                if wm_keys:
+                    n=[r for r in n if not any(kw in " ".join(r) for kw in wm_keys)]
                 if n: all_tables.append(n)
+    return _merge_tables(all_tables, settings), strategy
+
+# ── 模式二：文字座標精準解析 ───────────────────
+def parse_coords(pdf_path, settings, log_cb=None):
+    wm_keys = [k.strip() for k in settings["watermark_keywords"].split(",") if k.strip()]
+    # 解析欄界
+    bounds_str = settings.get("col_bounds","").strip()
+    if bounds_str:
+        try:
+            bounds = [float(x) for x in bounds_str.split(",") if x.strip()]
+            bounds = sorted(bounds) + [9999]
+        except: bounds = None
+    else: bounds = None
+
+    all_rows = []
+    with pdfplumber.open(pdf_path) as pdf:
+        if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（座標模式）")
+        for pn,page in enumerate(pdf.pages,1):
+            if log_cb: log_cb(f"  解析第 {pn} 頁...")
+            words = page.extract_words(x_tolerance=3,y_tolerance=3,
+                                       keep_blank_chars=False,use_text_flow=False)
+            if not words: continue
+            # 自動偵測欄界（從第一頁標題列）
+            if bounds is None and pn==1:
+                bounds = _auto_detect_bounds(words)
+                if log_cb: log_cb(f"  自動偵測欄界：{bounds[:-1]}")
+
+            # 依 y 分組
+            lines={}
+            for w in words:
+                y=round(w["top"]/4)*4
+                lines.setdefault(y,[]).append(w)
+
+            for y in sorted(lines):
+                ws_line=sorted(lines[y],key=lambda w:w["x0"])
+                line_text=" ".join(w["text"] for w in ws_line)
+                # 過濾浮水印
+                if wm_keys and any(kw in line_text for kw in wm_keys): continue
+                if not line_text.strip(): continue
+                # 分配欄位
+                ncols = len(bounds)-1 if bounds else 8
+                row=[""]*ncols
+                for w in ws_line:
+                    ci=_get_col(w["x0"], bounds) if bounds else 0
+                    if ci<ncols:
+                        row[ci]=(row[ci]+" "+w["text"]).strip()
+                if any(row): all_rows.append(row)
+
+    # 整理：去標題、合併續行
+    return _process_coord_rows(all_rows, settings), "coords"
+
+def _auto_detect_bounds(words):
+    """從文字分布自動偵測欄界"""
+    # 收集所有 x0，找出明顯的聚集點
+    x0s = [w["x0"] for w in words]
+    if not x0s: return [0,9999]
+    # 用簡單的間隔聚類
+    sorted_x = sorted(set(round(x) for x in x0s))
+    clusters=[sorted_x[0]]
+    for x in sorted_x[1:]:
+        if x-clusters[-1]>20: clusters.append(x)
+    # 欄界設在兩個聚類中間
+    bounds=[0]
+    for i in range(len(clusters)-1):
+        mid=(clusters[i]+clusters[i+1])/2
+        bounds.append(mid)
+    bounds.append(9999)
+    return bounds
+
+def _get_col(x, bounds):
+    for i in range(len(bounds)-1):
+        if bounds[i]<=x<bounds[i+1]: return i
+    return len(bounds)-2
+
+def _process_coord_rows(rows, settings):
+    """去重複標題、合併續行備註"""
+    if not rows: return []
+    anchor=settings.get("anchor_col",0)
+    skip_dup=settings.get("skip_duplicate_header",True)
+    result=[]; header=None
+    for row in rows:
+        row_text=" ".join(row)
+        # 偵測標題列
+        is_hdr=("出貨單編號" in row_text and "出貨日期" in row_text) or \
+               (header is None and any(row))
+        if is_hdr:
+            if header is None:
+                header=row; result.append(row)
+            elif skip_dup and rows_equal(row,header):
+                continue
+            else:
+                result.append(row)
+            continue
+        # 錨點欄空白 → 續行，合併到上一筆備註
+        anchor_val=row[anchor] if anchor<len(row) else ""
+        if not anchor_val and result:
+            extra=" ".join(v for v in row if v)
+            if extra:
+                last=result[-1]
+                last_note=last[-1] if last else ""
+                result[-1]=last[:-1]+[((last_note+"\n"+extra) if last_note else extra)]
+        else:
+            result.append(row)
+    return result
+
+def _merge_tables(all_tables, settings):
+    skip_dup=settings.get("skip_duplicate_header",True)
     merged=[]; header=None
     for table in all_tables:
         if not table: continue
         if header is None:
             header=table[0]; merged.extend(table)
         else:
-            start=1 if rows_equal(table[0],header) else 0
+            start=1 if (skip_dup and rows_equal(table[0],header)) else 0
             merged.extend(table[start:])
-    return merged, strategy_used
+    return merged
 
-def detect_merges(merged_table):
-    if len(merged_table)<2: return {}
-    ncols=max(len(r) for r in merged_table)
-    data=merged_table[1:]
+# ── 合併儲存格偵測 ────────────────────────────
+def detect_merges(table):
+    if len(table)<2: return {}
+    ncols=max(len(r) for r in table)
+    data=table[1:]
     info={}
     for ci in range(ncols):
         ranges=[]; i=0
@@ -112,7 +214,8 @@ def detect_merges(merged_table):
         if ranges: info[ci]=ranges
     return info
 
-def write_excel(merged_table, merge_info, out_path, col_map=None):
+# ── 寫入 Excel ────────────────────────────────
+def write_excel(table, merge_info, out_path, col_map=None):
     wb=Workbook(); ws=wb.active; ws.title="轉換結果"
     hfill=PatternFill(start_color="0F3460",end_color="0F3460",fill_type="solid")
     hfont=Font(color="FFFFFF",bold=True,size=11)
@@ -123,17 +226,16 @@ def write_excel(merged_table, merge_info, out_path, col_map=None):
     bdr=Border(left=thin,right=thin,top=thin,bottom=thin)
     ctr=Alignment(horizontal="center",vertical="center",wrap_text=True)
     lwrap=Alignment(horizontal="left",vertical="center",wrap_text=True)
-    if not merged_table: wb.save(out_path); return
-    ncols=max(len(r) for r in merged_table)
+    if not table: wb.save(out_path); return
+    ncols=max(len(r) for r in table)
     col_max=[8]*ncols
-    for row in merged_table:
-        for ci,val in enumerate(row): col_max[ci]=min(max(col_max[ci],len(str(val or ""))),40)
+    for row in table:
+        for ci,v in enumerate(row): col_max[ci]=min(max(col_max[ci],len(str(v or ""))),40)
     for ci in range(ncols):
         ws.column_dimensions[get_column_letter(ci+1)].width=col_max[ci]+4
     drc=0
-    for ri,row in enumerate(merged_table):
+    for ri,row in enumerate(table):
         er=ri+1; is_hdr=(ri==0)
-        ws.row_dimensions[er].height=20 if is_hdr else 16
         for ci in range(ncols):
             val=row[ci] if ci<len(row) else ""
             if is_hdr and col_map and ci in col_map: val=col_map[ci]
@@ -142,7 +244,14 @@ def write_excel(merged_table, merge_info, out_path, col_map=None):
             cell.alignment=ctr if is_hdr else lwrap
             if is_hdr: cell.fill=hfill; cell.font=hfont
             else: cell.fill=o_fill if drc%2==0 else e_fill; cell.font=Font(size=10)
-        if not is_hdr: drc+=1
+        # 備註欄自動調高
+        if not is_hdr:
+            note=row[-1] if row else ""
+            nl=str(note).count("\n")+1
+            ws.row_dimensions[er].height=max(16,15*nl)
+            drc+=1
+        else:
+            ws.row_dimensions[er].height=20
     ws.freeze_panes="A2"
     for ci,ranges in merge_info.items():
         for (si,ei) in ranges:
@@ -153,71 +262,128 @@ def write_excel(merged_table, merge_info, out_path, col_map=None):
                 cell=ws.cell(row=sr,column=ci+1)
                 cell.alignment=ctr; cell.fill=mfill
                 cell.font=Font(size=10,bold=True,color="1F3864"); cell.border=bdr
-            except Exception: pass
+            except: pass
     wb.save(out_path)
 
-def convert_pdf_to_excel(pdf_path, out_path, col_map=None, log_cb=None):
-    merged,strategy=parse_pdf(pdf_path,log_cb)
-    if log_cb: log_cb(f"  策略：{strategy}，{len(merged)} 列（含標題）")
-    mi=detect_merges(merged)
-    write_excel(merged,mi,out_path,col_map=col_map)
-    return max(0,len(merged)-1)
+def convert(pdf_path, out_path, settings, log_cb=None):
+    mode=settings.get("mode","auto")
+    if mode=="coords":
+        table,strategy=parse_coords(pdf_path,settings,log_cb)
+    elif mode=="table":
+        table,strategy=parse_auto(pdf_path,settings,log_cb)
+    else:
+        # auto：先試 table，若結果差再試 coords
+        table,strategy=parse_auto(pdf_path,settings,log_cb)
+        if not table or len(table)<3:
+            if log_cb: log_cb("  表格偵測結果少，切換座標模式...")
+            table,strategy=parse_coords(pdf_path,settings,log_cb)
+    if log_cb: log_cb(f"  策略：{strategy}，{len(table)} 列（含標題）")
+    mi=detect_merges(table)
+    write_excel(table,mi,out_path)
+    return max(0,len(table)-1), strategy
 
 
+# ══════════════════════════════════════════════
+#  GUI
+# ══════════════════════════════════════════════
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("PDF 轉 Excel 通用工具")
-        self.geometry("940x680"); self.minsize(800,580)
+        self.title("PDF 轉 Excel 通用工具 v3")
+        self.geometry("980x720"); self.minsize(860,600)
         self.configure(bg=BG)
-        self.pdf_files=[]; self.out_dir=tk.StringVar(value=os.path.expanduser("~\\Desktop"))
-        self.running=False; self._build_ui()
+        self.pdf_files=[]; self.running=False
+        self.settings=dict(DEFAULT_SETTINGS)
+        self.out_dir=tk.StringVar(value=os.path.expanduser("~\\Desktop"))
+        self._build()
 
-    def _build_ui(self):
-        hdr=tk.Frame(self,bg=CARD,height=58); hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr,text="PDF  →  Excel",font=("Segoe UI",18,"bold"),bg=CARD,fg="white").pack(side="left",padx=22,pady=8)
-        tk.Label(hdr,text="通用版・自動偵測・合併儲存格・多頁整合",font=("Segoe UI",10),bg=CARD,fg=TEXT2).pack(side="left")
+    def _build(self):
+        # ── 頂部標題 ──
+        hdr=tk.Frame(self,bg=CARD,height=56); hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr,text="PDF  →  Excel",font=("Segoe UI",17,"bold"),bg=CARD,fg="white").pack(side="left",padx=20,pady=8)
+        tk.Label(hdr,text="通用版 v3・雙模式・進階設定・合併儲存格",font=("Segoe UI",10),bg=CARD,fg=TEXT2).pack(side="left")
 
-        body=tk.Frame(self,bg=BG); body.pack(fill="both",expand=True,padx=18,pady=12)
-        left=tk.Frame(body,bg=BG); left.pack(side="left",fill="both",expand=True)
+        main=tk.Frame(self,bg=BG); main.pack(fill="both",expand=True,padx=16,pady=10)
 
-        r1=tk.Frame(left,bg=BG); r1.pack(fill="x",pady=(0,5))
+        # ── 左：檔案清單 ──
+        left=tk.Frame(main,bg=BG); left.pack(side="left",fill="both",expand=True)
+        r1=tk.Frame(left,bg=BG); r1.pack(fill="x",pady=(0,4))
         tk.Label(r1,text="PDF 檔案清單",font=("Segoe UI",10,"bold"),bg=BG,fg=TEXT).pack(side="left")
         tk.Button(r1,text="＋ 新增",font=("Segoe UI",9),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=10,pady=2,command=self.add_files).pack(side="right",padx=(3,0))
         tk.Button(r1,text="清除全部",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=10,pady=2,command=self.clear_files).pack(side="right")
-
         lf=tk.Frame(left,bg=CARD); lf.pack(fill="both",expand=True)
         sb=tk.Scrollbar(lf); sb.pack(side="right",fill="y")
         self.listbox=tk.Listbox(lf,yscrollcommand=sb.set,bg=CARD,fg=TEXT,selectbackground=ACCENT2,font=("Segoe UI",9),relief="flat",bd=0,highlightthickness=0,activestyle="none")
         self.listbox.pack(fill="both",expand=True,padx=2,pady=2)
         sb.config(command=self.listbox.yview)
-        self.listbox.bind("<Delete>",self.remove_selected)
+        self.listbox.bind("<Delete>",self.remove_sel)
         tk.Label(left,text="選中後按 Delete 可移除",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",pady=(3,0))
 
-        right=tk.Frame(body,bg=BG,width=238); right.pack(side="right",fill="y",padx=(14,0)); right.pack_propagate(False)
-        tk.Label(right,text="輸出資料夾",font=("Segoe UI",10,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
-        dr=tk.Frame(right,bg=BG); dr.pack(fill="x",pady=(3,10))
-        tk.Entry(dr,textvariable=self.out_dir,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(side="left",fill="x",expand=True,ipady=5,padx=(0,3))
-        tk.Button(dr,text="瀏覽",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=8,pady=2,command=self.browse_dir).pack(side="right")
+        # ── 右：設定面板 ──
+        right=tk.Frame(main,bg=BG,width=280); right.pack(side="right",fill="y",padx=(14,0)); right.pack_propagate(False)
 
-        self.count_lbl=tk.Label(right,text="尚未選擇檔案",font=("Segoe UI",9),bg=BG,fg=TEXT2)
-        self.count_lbl.pack(anchor="w",pady=(0,10))
+        # 輸出資料夾
+        tk.Label(right,text="輸出資料夾",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
+        dr=tk.Frame(right,bg=BG); dr.pack(fill="x",pady=(3,8))
+        tk.Entry(dr,textvariable=self.out_dir,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(side="left",fill="x",expand=True,ipady=4,padx=(0,3))
+        tk.Button(dr,text="瀏覽",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=7,pady=2,command=self.browse_dir).pack(side="right")
 
-        tk.Label(right,text="轉換進度",font=("Segoe UI",10,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
+        # ── 進階設定區 ──
+        adv=tk.LabelFrame(right,text=" ⚙  進階設定 ",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT2,bd=1,relief="groove")
+        adv.pack(fill="x",pady=(0,8))
+
+        # 解析模式
+        tk.Label(adv,text="解析模式",font=("Segoe UI",9),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(6,2))
+        self.mode_var=tk.StringVar(value="auto")
+        mf=tk.Frame(adv,bg=BG); mf.pack(fill="x",padx=8,pady=(0,4))
+        for val,lbl in [("auto","自動"),("table","表格偵測"),("coords","文字座標")]:
+            tk.Radiobutton(mf,text=lbl,variable=self.mode_var,value=val,
+                           bg=BG,fg=TEXT,selectcolor=BG2,activebackground=BG,
+                           font=("Segoe UI",9),command=self._on_mode_change).pack(side="left",padx=(0,8))
+
+        # 文字座標欄界（僅座標模式顯示）
+        self.bounds_frame=tk.Frame(adv,bg=BG); self.bounds_frame.pack(fill="x",padx=8,pady=(0,4))
+        tk.Label(self.bounds_frame,text="欄界 x 座標（逗號分隔，留空=自動）",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w")
+        self.bounds_var=tk.StringVar()
+        tk.Entry(self.bounds_frame,textvariable=self.bounds_var,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(fill="x",ipady=3)
+        tk.Label(self.bounds_frame,text="例：0,120,160,200,380,440,480",font=("Segoe UI",7),bg=BG,fg=TEXT2).pack(anchor="w")
+        self.bounds_frame.pack_forget()  # 預設隱藏
+
+        # 浮水印關鍵字
+        tk.Label(adv,text="浮水印關鍵字（逗號分隔）",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(0,2))
+        self.wm_var=tk.StringVar()
+        tk.Entry(adv,textvariable=self.wm_var,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(fill="x",padx=8,ipady=3,pady=(0,4))
+        tk.Label(adv,text="例：B242,允將,CONFIDENTIAL",font=("Segoe UI",7),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(0,2))
+
+        # 錨點欄
+        tk.Label(adv,text="錨點欄編號（0開始，空白=不用）",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(2,2))
+        self.anchor_var=tk.StringVar(value="0")
+        tk.Entry(adv,textvariable=self.anchor_var,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8),width=6).pack(anchor="w",padx=8,ipady=3,pady=(0,4))
+
+        # 刪除重複標題
+        self.skip_dup_var=tk.BooleanVar(value=True)
+        tk.Checkbutton(adv,text="自動刪除重複標題列",variable=self.skip_dup_var,
+                       bg=BG,fg=TEXT,selectcolor=BG2,activebackground=BG,
+                       font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=(0,6))
+
+        # 進度條
+        tk.Label(right,text="轉換進度",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
         s=ttk.Style(); s.theme_use("clam")
         s.configure("P.Horizontal.TProgressbar",troughcolor=CARD,background=ACCENT,darkcolor=ACCENT,lightcolor=ACCENT,bordercolor=BG,thickness=12)
         self.pbar=ttk.Progressbar(right,style="P.Horizontal.TProgressbar",orient="horizontal",mode="determinate")
         self.pbar.pack(fill="x",pady=(3,2))
-        self.pbar_lbl=tk.Label(right,text="",font=("Segoe UI",8),bg=BG,fg=TEXT2); self.pbar_lbl.pack(anchor="w",pady=(0,10))
+        self.pbar_lbl=tk.Label(right,text="",font=("Segoe UI",8),bg=BG,fg=TEXT2); self.pbar_lbl.pack(anchor="w",pady=(0,8))
 
+        # 按鈕
         bc=dict(relief="flat",cursor="hand2")
-        tk.Button(right,text="🔍  預覽 / 調整欄位",font=("Segoe UI",10),bg=CARD,fg=TEXT,pady=8,command=self.open_preview,**bc).pack(fill="x",pady=(0,5))
-        self.btn_start=tk.Button(right,text="▶  開始批次轉換",font=("Segoe UI",13,"bold"),bg=ACCENT,fg="white",pady=10,command=self.start_convert,**bc)
-        self.btn_start.pack(fill="x",pady=(0,5))
-        tk.Button(right,text="📂  開啟輸出資料夾",font=("Segoe UI",9),bg=BG2,fg=TEXT2,pady=6,command=self.open_out,**bc).pack(fill="x")
+        tk.Button(right,text="🔍  預覽 / 調整欄位",font=("Segoe UI",10),bg=CARD,fg=TEXT,pady=7,command=self.open_preview,**bc).pack(fill="x",pady=(0,4))
+        self.btn_start=tk.Button(right,text="▶  開始批次轉換",font=("Segoe UI",12,"bold"),bg=ACCENT,fg="white",pady=9,command=self.start_convert,**bc)
+        self.btn_start.pack(fill="x",pady=(0,4))
+        tk.Button(right,text="📂  開啟輸出資料夾",font=("Segoe UI",9),bg=BG2,fg=TEXT2,pady=5,command=self.open_out,**bc).pack(fill="x")
 
-        logf=tk.Frame(self,bg=BG2,height=155); logf.pack(fill="x",padx=18,pady=(0,12)); logf.pack_propagate(False)
-        tk.Label(logf,text="執行記錄",font=("Segoe UI",9,"bold"),bg=BG2,fg=TEXT2).pack(anchor="w",padx=10,pady=(5,0))
+        # Log
+        logf=tk.Frame(self,bg=BG2,height=150); logf.pack(fill="x",padx=16,pady=(0,10)); logf.pack_propagate(False)
+        tk.Label(logf,text="執行記錄",font=("Segoe UI",9,"bold"),bg=BG2,fg=TEXT2).pack(anchor="w",padx=10,pady=(4,0))
         lsb=tk.Scrollbar(logf); lsb.pack(side="right",fill="y")
         self.log_box=tk.Text(logf,yscrollcommand=lsb.set,bg=BG2,fg=TEXT2,font=("Consolas",8),relief="flat",bd=0,state="disabled",wrap="word",highlightthickness=0)
         self.log_box.pack(fill="both",expand=True,padx=10,pady=(0,6))
@@ -226,64 +392,89 @@ class App(tk.Tk):
         self.log_box.tag_config("err",foreground=ERROR)
         self.log_box.tag_config("warn",foreground=WARNING)
 
+    def _on_mode_change(self):
+        if self.mode_var.get()=="coords":
+            self.bounds_frame.pack(fill="x",padx=8,pady=(0,4))
+        else:
+            self.bounds_frame.pack_forget()
+
+    def _get_settings(self):
+        anchor_str=self.anchor_var.get().strip()
+        return {
+            "mode": self.mode_var.get(),
+            "watermark_keywords": self.wm_var.get(),
+            "anchor_col": int(anchor_str) if anchor_str.isdigit() else 0,
+            "skip_duplicate_header": self.skip_dup_var.get(),
+            "col_bounds": self.bounds_var.get(),
+        }
+
     def add_files(self):
-        fs=filedialog.askopenfilenames(title="選擇 PDF 檔案",filetypes=[("PDF","*.pdf"),("所有","*.*")])
+        fs=filedialog.askopenfilenames(title="選擇 PDF",filetypes=[("PDF","*.pdf"),("所有","*.*")])
         for f in fs:
             if f not in self.pdf_files: self.pdf_files.append(f); self.listbox.insert("end",os.path.basename(f))
-        self._upd_count()
+        n=len(self.pdf_files)
 
-    def remove_selected(self,e=None):
+    def remove_sel(self,e=None):
         for i in reversed(self.listbox.curselection()): self.listbox.delete(i); self.pdf_files.pop(i)
-        self._upd_count()
 
-    def clear_files(self): self.pdf_files.clear(); self.listbox.delete(0,"end"); self._upd_count()
+    def clear_files(self): self.pdf_files.clear(); self.listbox.delete(0,"end")
     def browse_dir(self):
-        d=filedialog.askdirectory(title="選擇輸出資料夾")
+        d=filedialog.askdirectory(); 
         if d: self.out_dir.set(d)
     def open_out(self):
         d=self.out_dir.get()
         if os.path.isdir(d): os.startfile(d)
-    def _upd_count(self):
-        n=len(self.pdf_files); self.count_lbl.config(text=f"已選 {n} 個 PDF" if n else "尚未選擇檔案")
 
     def log(self,msg,tag="info"):
         self.log_box.config(state="normal"); self.log_box.insert("end",msg+"\n",tag)
         self.log_box.see("end"); self.log_box.config(state="disabled")
 
     def open_preview(self):
-        if not self.pdf_files: messagebox.showwarning("提示","請先新增 PDF 檔案！"); return
+        if not self.pdf_files: messagebox.showwarning("提示","請先新增 PDF！"); return
         sel=self.listbox.curselection()
         pdf=self.pdf_files[sel[0] if sel else 0]
+        settings=self._get_settings()
         self.log(f"載入預覽：{os.path.basename(pdf)}")
         def _load():
             try:
-                merged,strategy=parse_pdf(pdf,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
-                self.after(0,lambda:PreviewWindow(self,pdf,merged,strategy))
+                n,strategy=convert(pdf,None,settings,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
+            except Exception: pass
+            # 重新跑一次拿資料
+            try:
+                mode=settings.get("mode","auto")
+                if mode=="coords": table,strategy=parse_coords(pdf,settings,lambda m:self.after(0,lambda m=m:self.log(m)))
+                elif mode=="table": table,strategy=parse_auto(pdf,settings,lambda m:self.after(0,lambda m=m:self.log(m)))
+                else:
+                    table,strategy=parse_auto(pdf,settings,lambda m:self.after(0,lambda m=m:self.log(m)))
+                    if not table or len(table)<3:
+                        table,strategy=parse_coords(pdf,settings,lambda m:self.after(0,lambda m=m:self.log(m)))
+                self.after(0,lambda:PreviewWin(self,pdf,table,strategy,settings))
             except Exception as e:
                 self.after(0,lambda:self.log(f"預覽失敗：{e}","err"))
         threading.Thread(target=_load,daemon=True).start()
 
     def start_convert(self):
         if self.running: return
-        if not self.pdf_files: messagebox.showwarning("提示","請先新增 PDF 檔案！"); return
-        if not os.path.isdir(self.out_dir.get()): messagebox.showerror("錯誤",f"資料夾不存在：\n{self.out_dir.get()}"); return
+        if not self.pdf_files: messagebox.showwarning("提示","請先新增 PDF！"); return
+        if not os.path.isdir(self.out_dir.get()): messagebox.showerror("錯誤",f"資料夾不存在：{self.out_dir.get()}"); return
         self.running=True; self.btn_start.config(state="disabled",text="⏳  轉換中...")
         self.pbar["value"]=0; threading.Thread(target=self._run,daemon=True).start()
 
     def _run(self):
-        files=list(self.pdf_files); out_dir=self.out_dir.get(); ok=fail=0
-        self.log("═"*46); self.log(f"開始批次轉換，共 {len(files)} 個")
+        files=list(self.pdf_files); out_dir=self.out_dir.get()
+        settings=self._get_settings(); ok=fail=0
+        self.log("═"*44); self.log(f"開始轉換 {len(files)} 個（模式：{settings['mode']}）")
         for i,pdf in enumerate(files):
             fname=os.path.basename(pdf); self.log(f"\n[{i+1}/{len(files)}] {fname}")
             self.after(0,lambda v=i/len(files)*100:self._set_pbar(v))
-            out_path=os.path.join(out_dir,os.path.splitext(fname)[0]+".xlsx")
+            out=os.path.join(out_dir,os.path.splitext(fname)[0]+".xlsx")
             try:
-                n=convert_pdf_to_excel(pdf,out_path,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
-                ok+=1; self.log(f"  ✅ {n} 筆 → {os.path.basename(out_path)}","ok")
+                n,strategy=convert(pdf,out,settings,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
+                ok+=1; self.log(f"  ✅ {n} 筆 [{strategy}] → {os.path.basename(out)}","ok")
             except Exception as e:
-                fail+=1; self.log(f"  ❌ 失敗：{e}","err")
+                fail+=1; self.log(f"  ❌ {e}","err")
         self.after(0,lambda:self._set_pbar(100))
-        self.log("\n"+"═"*46)
+        self.log("\n"+"═"*44)
         self.log(f"完成：成功 {ok} / 失敗 {fail}","ok" if fail==0 else "err")
         self.after(0,self._done)
 
@@ -291,37 +482,39 @@ class App(tk.Tk):
     def _done(self): self.running=False; self.btn_start.config(state="normal",text="▶  開始批次轉換")
 
 
-class PreviewWindow(tk.Toplevel):
-    def __init__(self,master,pdf_path,merged_table,strategy):
+class PreviewWin(tk.Toplevel):
+    def __init__(self,master,pdf_path,table,strategy,settings):
         super().__init__(master)
-        self.pdf_path=pdf_path; self.merged_table=merged_table
-        self.strategy=strategy; self.col_vars=[]
-        self.title(f"預覽 / 欄位調整 — {os.path.basename(pdf_path)}")
-        self.geometry("1160x640"); self.configure(bg=BG); self._build()
+        self.pdf_path=pdf_path; self.table=table
+        self.strategy=strategy; self.settings=settings; self.col_vars=[]
+        self.title(f"預覽 — {os.path.basename(pdf_path)}")
+        self.geometry("1180x660"); self.configure(bg=BG); self._build()
 
     def _build(self):
-        info=tk.Frame(self,bg=BG2,height=34); info.pack(fill="x"); info.pack_propagate(False)
-        ncols=max((len(r) for r in self.merged_table),default=0)
-        nrows=len(self.merged_table)
-        tk.Label(info,text=f"  策略：{self.strategy}    共 {nrows} 列 × {ncols} 欄    （前 50 列預覽）",
-                 font=("Segoe UI",9),bg=BG2,fg=TEXT2).pack(side="left",padx=6)
+        # 資訊列
+        info=tk.Frame(self,bg=BG2,height=32); info.pack(fill="x"); info.pack_propagate(False)
+        nrows=len(self.table); ncols=max((len(r) for r in self.table),default=0)
+        tk.Label(info,text=f"  策略：{self.strategy}    {nrows} 列 × {ncols} 欄    （前 50 列）",
+                 font=("Segoe UI",9),bg=BG2,fg=TEXT2).pack(side="left",padx=8)
 
-        if self.merged_table:
-            hf=tk.Frame(self,bg=BG); hf.pack(fill="x",padx=12,pady=(8,3))
-            tk.Label(hf,text="欄位名稱（可直接修改後點「套用」更新預覽）：",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(side="left")
-            ce=tk.Frame(self,bg=BG); ce.pack(fill="x",padx=12,pady=(0,4))
-            for ci,hval in enumerate(self.merged_table[0]):
+        # 欄位名稱編輯
+        if self.table:
+            hf=tk.Frame(self,bg=BG); hf.pack(fill="x",padx=10,pady=(6,2))
+            tk.Label(hf,text="欄位名稱（可修改，點「套用」更新預覽）：",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(side="left")
+            ce=tk.Frame(self,bg=BG); ce.pack(fill="x",padx=10,pady=(0,4))
+            for ci,hval in enumerate(self.table[0]):
                 v=tk.StringVar(value=clean(hval)); self.col_vars.append(v)
-                f=tk.Frame(ce,bg=CARD,padx=4,pady=3); f.pack(side="left",padx=(0,4))
+                f=tk.Frame(ce,bg=CARD,padx=4,pady=2); f.pack(side="left",padx=(0,3))
                 tk.Label(f,text=f"欄{ci+1}",font=("Segoe UI",7),bg=CARD,fg=TEXT2).pack()
-                tk.Entry(f,textvariable=v,width=12,bg=BG2,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",9)).pack(ipady=3)
+                tk.Entry(f,textvariable=v,width=11,bg=BG2,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(ipady=2)
 
-        tf=tk.Frame(self,bg=BG); tf.pack(fill="both",expand=True,padx=12,pady=(0,6))
-        preview=self.merged_table[:50]
+        # 表格
+        tf=tk.Frame(self,bg=BG); tf.pack(fill="both",expand=True,padx=10,pady=(0,4))
+        preview=self.table[:50]
         ncols2=max((len(r) for r in preview),default=1)
-        cols=[f"欄{i+1}" for i in range(ncols2)]
-        self.tree=ttk.Treeview(tf,columns=cols,show="headings",height=18)
-        cw=max(80,min(180,900//max(len(cols),1)))
+        cols=[f"C{i+1}" for i in range(ncols2)]
+        self.tree=ttk.Treeview(tf,columns=cols,show="headings",height=17)
+        cw=max(70,min(160,860//max(len(cols),1)))
         for c in cols: self.tree.heading(c,text=c); self.tree.column(c,width=cw,anchor="w")
         vsb=ttk.Scrollbar(tf,orient="vertical",command=self.tree.yview)
         hsb=ttk.Scrollbar(tf,orient="horizontal",command=self.tree.xview)
@@ -331,25 +524,26 @@ class PreviewWindow(tk.Toplevel):
         s=ttk.Style()
         s.configure("Treeview",background=CARD,foreground=TEXT,fieldbackground=CARD,font=("Segoe UI",9),rowheight=20)
         s.configure("Treeview.Heading",background=BG2,foreground=TEXT,font=("Segoe UI",9,"bold"))
-        self._fill_tree(preview)
+        self._fill(preview)
 
-        bf=tk.Frame(self,bg=BG); bf.pack(fill="x",padx=12,pady=(0,10))
-        tk.Button(bf,text="🔄  套用欄位名稱",font=("Segoe UI",9),bg=CARD,fg=TEXT,relief="flat",cursor="hand2",padx=12,pady=5,command=self._apply).pack(side="left",padx=(0,8))
-        tk.Button(bf,text="💾  另存為 Excel",font=("Segoe UI",10,"bold"),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=16,pady=6,command=self.save).pack(side="right")
-        tk.Button(bf,text="關閉",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=12,pady=6,command=self.destroy).pack(side="right",padx=(0,6))
+        # 按鈕
+        bf=tk.Frame(self,bg=BG); bf.pack(fill="x",padx=10,pady=(0,8))
+        tk.Button(bf,text="🔄  套用欄位名稱",font=("Segoe UI",9),bg=CARD,fg=TEXT,relief="flat",cursor="hand2",padx=10,pady=4,command=self._apply).pack(side="left",padx=(0,6))
+        tk.Button(bf,text="💾  另存為 Excel",font=("Segoe UI",10,"bold"),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=14,pady=5,command=self.save).pack(side="right")
+        tk.Button(bf,text="關閉",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=10,pady=5,command=self.destroy).pack(side="right",padx=(0,5))
 
-    def _fill_tree(self,data):
+    def _fill(self,data):
         self.tree.delete(*self.tree.get_children())
         if not data: return
         header=[v.get() if i<len(self.col_vars) else f"欄{i+1}" for i,v in enumerate(self.col_vars)] if self.col_vars else [clean(v) or f"欄{i+1}" for i,v in enumerate(data[0])]
         ncols=max(len(r) for r in data)
-        cols=[f"欄{i+1}" for i in range(ncols)]
+        cols=[f"C{i+1}" for i in range(ncols)]
         for c,h in zip(cols,header): self.tree.heading(c,text=h)
         for row in data[1:]:
             vals=[row[i] if i<len(row) else "" for i in range(ncols)]
-            self.tree.insert("","end",values=vals)
+            self.tree.insert("","end",values=[v.replace("\n"," / ") for v in vals])
 
-    def _apply(self): self._fill_tree(self.merged_table[:50])
+    def _apply(self): self._fill(self.table[:50])
 
     def save(self):
         out=filedialog.asksaveasfilename(title="另存 Excel",defaultextension=".xlsx",
@@ -358,8 +552,8 @@ class PreviewWindow(tk.Toplevel):
         if not out: return
         try:
             col_map={i:v.get() for i,v in enumerate(self.col_vars) if v.get()} if self.col_vars else None
-            mi=detect_merges(self.merged_table)
-            write_excel(self.merged_table,mi,out,col_map=col_map)
+            mi=detect_merges(self.table)
+            write_excel(self.table,mi,out,col_map=col_map)
             messagebox.showinfo("完成",f"已儲存：\n{out}")
             os.startfile(os.path.dirname(out))
         except Exception as e:
