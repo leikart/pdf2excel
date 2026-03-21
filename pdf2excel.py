@@ -244,11 +244,24 @@ def _merge_tables(all_tables, settings):
 # ══════════════════════════════════════════
 #  合併儲存格偵測
 # ══════════════════════════════════════════
-def detect_merges(table):
+def detect_merges(table, merge_cols=None):
+    """
+    偵測需要合併的欄位範圍。
+    merge_cols: 指定欄位索引清單，只合併這些欄（預設只合併出貨日期=1和星期=2）
+    若為 None 且無法判斷，預設只合併索引1和2。
+    """
     if len(table)<2: return {}
-    ncols=max(len(r) for r in table)
     data=table[1:]; info={}
-    for ci in range(ncols):
+    # 預設只合併出貨日期（欄1）和星期（欄2）
+    if merge_cols is None:
+        # 嘗試從標題判斷日期/星期欄位
+        header=table[0]
+        date_cols=[]
+        for ci,h in enumerate(header):
+            if any(k in str(h) for k in ["日期","星期","週","week","date","Date"]):
+                date_cols.append(ci)
+        merge_cols=date_cols if date_cols else [1,2]
+    for ci in merge_cols:
         ranges=[]; i=0
         while i<len(data):
             val=data[i][ci] if ci<len(data[i]) else ""
@@ -256,8 +269,8 @@ def detect_merges(table):
                 j=i+1
                 while j<len(data):
                     nv=data[j][ci] if ci<len(data[j]) else ""
-                    if nv=="" or nv==val: j+=1
-                    else: break
+                    if nv=="": j+=1   # 空白代表同一天，繼續合併
+                    else: break        # 有新值代表換天，停止
                 if j-i>1: ranges.append((i,j-1))
                 i=j
             else: i+=1
@@ -516,6 +529,11 @@ class App(tk.Tk):
             fname=os.path.basename(pdf); self.log(f"\n[{i+1}/{len(files)}] {fname}")
             self.after(0,lambda v=i/len(files)*100:self._set_pbar(v))
             out=os.path.join(out_dir,os.path.splitext(fname)[0]+".xlsx")
+            if os.path.exists(out):
+                ans=messagebox.askyesno("檔案已存在",
+                    f"檔案已存在，是否覆蓋？\n{os.path.basename(out)}")
+                if not ans:
+                    self.log(f"  ⏭  跳過（使用者取消）","warn"); continue
             try:
                 table,strategy=convert(pdf,out,settings,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
                 ok+=1; self.log(f"  ✅ {max(0,len(table)-1)} 筆 [{strategy}] → {os.path.basename(out)}","ok")
