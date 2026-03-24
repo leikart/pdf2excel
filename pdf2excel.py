@@ -483,12 +483,36 @@ def convert(pdf_path, out_path, settings, log_cb=None):
 #  比對核心
 # ════════════════════════════════════════════════════════
 
+def _merge_double_header(rows):
+    """
+    通用雙層標題合併：
+    若第0列某欄為空、第1列有值，且第1列其他欄也有值 → 判定為雙層標題
+    自動合併成單列標題
+    """
+    if len(rows)<2: return rows
+    r0=[clean(v) for v in rows[0]]
+    r1=[clean(v) for v in rows[1]]
+    # 判斷是否為雙層標題：第1列有值且不全是數字/資料
+    r1_has_text=sum(1 for v in r1 if v and not v.replace(".","").replace("-","").isdigit())
+    r0_empty_count=sum(1 for v in r0 if not v)
+    if r1_has_text>=2 and r0_empty_count>=2:
+        merged=[]
+        for ci in range(max(len(r0),len(r1))):
+            v0=r0[ci] if ci<len(r0) else ""
+            v1=r1[ci] if ci<len(r1) else ""
+            if v0 and v1 and v0!=v1: merged.append(v1)  # 子標題優先
+            elif v0: merged.append(v0)
+            elif v1: merged.append(v1)
+            else: merged.append(f"欄{ci+1}")
+        return [merged]+rows[2:]
+    return rows
+
 def load_table_from_file(path, settings, log_cb=None):
     ext=os.path.splitext(path)[1].lower()
     if ext==".pdf":
         if log_cb: log_cb(f"  轉換 PDF：{os.path.basename(path)}")
         table,_=convert(path, None, settings, log_cb=log_cb)
-        return table
+        return _merge_double_header(table)
     elif ext in (".xlsx",".xls"):
         if log_cb: log_cb(f"  載入 Excel：{os.path.basename(path)}")
         wb=_load_wb(path, data_only=True)
@@ -497,7 +521,7 @@ def load_table_from_file(path, settings, log_cb=None):
         for row in ws.iter_rows(values_only=True):
             r=[clean(v) for v in row]
             if any(r): rows.append(r)
-        return rows
+        return _merge_double_header(rows)
     else:
         raise ValueError(f"不支援的格式：{ext}")
 
@@ -874,16 +898,20 @@ class App(tk.Tk):
                  bg=BG,fg=TEXT).pack(anchor="w",pady=(0,8))
 
         files_row=tk.Frame(top,bg=BG); files_row.pack(fill="x")
+        self._cmp_path_labels={}
         for i,(lbl,var_attr) in enumerate([("📄 檔案 A（舊版）","_cmp_file_a"),
                                             ("📄 檔案 B（新版）","_cmp_file_b")]):
-            col=tk.Frame(files_row,bg=CARD); col.pack(side="left",fill="x",expand=True,padx=(0,8) if i==0 else 0)
+            col=tk.Frame(files_row,bg=CARD)
+            col.pack(side="left",fill="x",expand=True,padx=(0,8) if i==0 else 0)
             tk.Label(col,text=lbl,font=("Segoe UI",11,"bold"),
                      bg=CARD,fg=TEXT2,padx=12).pack(anchor="w",pady=(8,2))
             row=tk.Frame(col,bg=CARD); row.pack(fill="x",padx=8,pady=(0,8))
-            var=getattr(self,var_attr)
-            tk.Entry(row,textvariable=var,bg="#0A1828",fg=TEXT,
-                     insertbackground="white",relief="flat",
-                     font=("Segoe UI",10),state="readonly").pack(side="left",fill="x",expand=True,ipady=6)
+            # Label 顯示路徑（Entry readonly 在某些 Windows 版本無法顯示內容）
+            path_lbl=tk.Label(row,text="（尚未選擇）",
+                              font=("Segoe UI",10),bg="#0A1828",fg="#4A6080",
+                              anchor="w",padx=8)
+            path_lbl.pack(side="left",fill="x",expand=True,ipady=6)
+            self._cmp_path_labels[var_attr]=path_lbl
             tk.Button(row,text="選擇",font=("Segoe UI",10),
                       bg=ACCENT,fg="white",relief="flat",cursor="hand2",
                       padx=10,pady=4,
@@ -953,27 +981,40 @@ class App(tk.Tk):
         f=filedialog.askopenfilename(
             title="選擇檔案",
             filetypes=[("PDF/Excel","*.pdf *.xlsx *.xls"),("所有","*.*")])
-        if f: getattr(self,var_attr).set(f)
+        if f:
+            getattr(self,var_attr).set(f)
+            fname=os.path.basename(f)
+            # 更新路徑顯示 Label
+            lbl=self._cmp_path_labels.get(var_attr)
+            if lbl: lbl.config(text=fname,fg=TEXT)
 
     def _cmp_load(self):
         fa=self._cmp_file_a.get(); fb=self._cmp_file_b.get()
-        if not fa or not fb:
-            messagebox.showwarning("提示","請先選擇兩份檔案！"); return
-        self._cmp_status.config(text="載入中...")
+        if not fa:
+            messagebox.showwarning("提示","請先選擇檔案 A！"); return
+        if not fb:
+            messagebox.showwarning("提示","請先選擇檔案 B！"); return
+        self._cmp_status.config(text="⏳ 載入中，PDF 需要轉換請稍候...",fg=WARNING)
         def _load():
             try:
                 s=self._get_settings()
+                self.after(0,lambda:self._cmp_status.config(text="⏳ 載入檔案 A..."))
                 ta=load_table_from_file(fa,s)
+                self.after(0,lambda:self._cmp_status.config(text="⏳ 載入檔案 B..."))
                 tb=load_table_from_file(fb,s)
                 self._cmp_table_a=ta
                 self._cmp_table_b=tb
-                header=ta[0] if ta else (tb[0] if tb else [])
+                # 使用欄位數較多的那份作為標題來源
+                ha=ta[0] if ta else []
+                hb=tb[0] if tb else []
+                header=ha if len(ha)>=len(hb) else hb
                 self._cmp_header=header
                 self.after(0,lambda:self._cmp_show_cols(header))
                 self.after(0,lambda:self._cmp_status.config(
-                    text=f"✅ 已載入  A：{len(ta)-1}列  B：{len(tb)-1}列"))
+                    text=f"✅ 已載入  A：{max(0,len(ta)-1)} 列  B：{max(0,len(tb)-1)} 列",
+                    fg=SUCCESS))
             except Exception as e:
-                self.after(0,lambda:self._cmp_status.config(text=f"❌ {e}"))
+                self.after(0,lambda:self._cmp_status.config(text=f"❌ 錯誤：{e}",fg=ERROR))
         threading.Thread(target=_load,daemon=True).start()
 
     def _cmp_show_cols(self, header):
@@ -985,16 +1026,33 @@ class App(tk.Tk):
         tk.Label(self._cmp_col_frame,
                  text="勾選要比對的欄位（未勾選的欄位不納入比對）：",
                  font=("Segoe UI",11),bg=BG,fg=TEXT2).pack(anchor="w",pady=(0,6))
+
+        # 全選 / 全不選 快捷按鈕
+        btn_row=tk.Frame(self._cmp_col_frame,bg=BG)
+        btn_row.pack(anchor="w",pady=(0,6))
+        def _all(v):
+            for var in self._cmp_col_vars: var.set(v)
+        tk.Button(btn_row,text="全選",font=("Segoe UI",10),
+                  bg=CARD,fg=TEXT,relief="flat",cursor="hand2",
+                  padx=10,pady=3,command=lambda:_all(True)).pack(side="left",padx=(0,6))
+        tk.Button(btn_row,text="全不選",font=("Segoe UI",10),
+                  bg=CARD,fg=TEXT2,relief="flat",cursor="hand2",
+                  padx=10,pady=3,command=lambda:_all(False)).pack(side="left")
+
         grid=tk.Frame(self._cmp_col_frame,bg=BG); grid.pack(fill="x")
+        cols_per_row=5  # 每列顯示幾個欄位
         for ci,h in enumerate(header):
             v=tk.BooleanVar(value=False)
             self._cmp_col_vars.append(v)
-            row,col=divmod(ci,4)
-            cb=tk.Checkbutton(grid,text=f"  {h or f'欄{ci+1}'}",
+            # 過濾無意義的空欄名
+            display_name=h if h and not h.startswith("欄") else f"欄{ci+1}"
+            row_idx,col_idx=divmod(ci,cols_per_row)
+            cb=tk.Checkbutton(grid,
+                               text=f"  {display_name}",
                                variable=v,bg=BG,fg=TEXT,
                                selectcolor=CARD,activebackground=BG,
                                font=("Segoe UI",11))
-            cb.grid(row=row,column=col,sticky="w",padx=(0,16),pady=2)
+            cb.grid(row=row_idx,column=col_idx,sticky="w",padx=(0,12),pady=3)
 
     def _cmp_run(self):
         if not self._cmp_table_a or not self._cmp_table_b:
