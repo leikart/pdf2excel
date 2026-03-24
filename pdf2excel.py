@@ -61,66 +61,143 @@ T_LINES={"vertical_strategy":"lines","horizontal_strategy":"lines",
          "intersection_tolerance":3,"text_tolerance":3}
 T_TEXT={**T_LINES,"vertical_strategy":"text","horizontal_strategy":"text"}
 
+def _extract_page_mixed(page, wm_keys, skip_dup, header, all_rows):
+    """
+    混合模式頁面解析：
+    - 有框線的部分：用 cell bbox 擷取（保留換行）
+    - 框線外的文字（說明文字/標題）：依 y 座標插入第一欄
+    回傳 (updated_header, strategy)
+    """
+    all_words = page.extract_words(x_tolerance=3, y_tolerance=3)
+    line_map = {}
+    for w in all_words:
+        y = round(w["top"]/3)*3
+        line_map.setdefault(y, []).append(w)
+
+    T_LINES_LOCAL={"vertical_strategy":"lines","horizontal_strategy":"lines",
+                   "snap_tolerance":3,"join_tolerance":3,"edge_min_length":3,
+                   "min_words_vertical":1,"min_words_horizontal":1,
+                   "intersection_tolerance":3,"text_tolerance":3}
+
+    tbl_objs = page.find_tables(T_LINES_LOCAL)
+    strategy = "lines+text" if tbl_objs else "text"
+
+    def _flat(row): return " ".join(v.replace("\n"," ") if v else "" for v in row)
+    def _is_wm(row): return any(k in _flat(row) for k in wm_keys) if wm_keys else False
+    def _is_hdr(row):
+        t = _flat(row)
+        return ("出貨單編號" in t and "出貨日期" in t) or ("出貨日期" in t and "星期" in t and "位置" in t)
+
+    page_rows = []  # (y, row_data)
+
+    if tbl_objs:
+        tbl_bboxes = [t.bbox for t in tbl_objs]
+
+        # ── 表格內容（cell level，保留換行）──
+        for tbl in tbl_objs:
+            for tbl_row in tbl.rows:
+                row_data = []; row_y = None
+                for cell in tbl_row.cells:
+                    if cell is None: row_data.append(""); continue
+                    x0,y0,x1,y1 = cell
+                    if row_y is None: row_y = (y0+y1)/2
+                    cell_lines = {}
+                    for y, ws in line_map.items():
+                        for w in ws:
+                            if y0<=w["top"]<=y1 and x0<=w["x0"]<=x1:
+                                cell_lines.setdefault(round(w["top"],1),[]).append(w["text"])
+                    text = "\n".join(" ".join(cell_lines[y]) for y in sorted(cell_lines))
+                    row_data.append(text)
+                if any(row_data) and row_y is not None:
+                    page_rows.append((row_y, row_data))
+
+        # ── 表格外的文字（說明文字，放入第一欄）──
+        for y_key in sorted(line_map.keys()):
+            ws_line = sorted(line_map[y_key], key=lambda w: w["x0"])
+            if not ws_line: continue
+            actual_y = ws_line[0]["top"]
+            line_text = " ".join(w["text"] for w in ws_line)
+            if not line_text.strip(): continue
+            in_tbl = any(ty0 <= actual_y <= ty1 for (_,ty0,_,ty1) in tbl_bboxes)
+            if not in_tbl:
+                page_rows.append((actual_y, [line_text]))
+    else:
+        # 純文字模式（無框線）
+        T_TEXT_LOCAL={**T_LINES_LOCAL,"vertical_strategy":"text","horizontal_strategy":"text"}
+        tables = page.extract_tables(T_TEXT_LOCAL)
+        if tables:
+            strategy = "text"
+            for t in tables:
+                for row in t:
+                    r = [clean(v) for v in row]
+                    if any(r):
+                        page_rows.append((0, r))
+        else:
+            for y_key in sorted(line_map.keys()):
+                ws_line = sorted(line_map[y_key], key=lambda w: w["x0"])
+                if not ws_line: continue
+                actual_y = ws_line[0]["top"]
+                line_text = " ".join(w["text"] for w in ws_line)
+                if line_text.strip():
+                    page_rows.append((actual_y, [line_text]))
+
+    # 依 y 排序
+    page_rows.sort(key=lambda x: x[0])
+
+    # 過濾浮水印、處理標題列、加入結果
+    for _, row_data in page_rows:
+        if _is_wm(row_data): continue
+        if _is_hdr(row_data):
+            if header is None:
+                header = [clean(v) for v in row_data]
+                all_rows.append(header)
+            elif not skip_dup:
+                all_rows.append([clean(v) for v in row_data])
+            continue
+        all_rows.append(row_data)
+
+    return header, strategy
+
 def parse_auto(pdf_path, settings, log_cb=None):
     wm=[k.strip() for k in settings["watermark_keywords"].split(",") if k.strip()]
     skip_dup=settings.get("skip_duplicate_header",True)
-    strategy="lines"; all_rows=[]; header=None
-
-    def _flat(row): return " ".join(v.replace("\n"," ") if v else "" for v in row)
-    def _is_wm(row): return any(k in _flat(row) for k in wm) if wm else False
-    def _is_hdr(row):
-        t=_flat(row)
-        return ("出貨單編號" in t and "出貨日期" in t) or ("出貨日期" in t and "星期" in t and "位置" in t)
+    all_rows=[]; header=None; strategy="lines"
 
     with pdfplumber.open(pdf_path) as pdf:
-        if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（自動模式）")
+        if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（混合模式）")
         for pn,page in enumerate(pdf.pages,1):
             if log_cb: log_cb(f"  解析第 {pn} 頁...")
-            tbl_objs=page.find_tables(T_LINES)
-            if not tbl_objs:
-                tbl_objs=page.find_tables(T_TEXT); strategy="text"
-            else: strategy="lines"
+            header, page_strategy = _extract_page_mixed(page, wm, skip_dup, header, all_rows)
+            strategy = page_strategy
 
-            if tbl_objs:
-                words=page.extract_words(x_tolerance=3,y_tolerance=3)
-                line_map={}
-                for w in words:
-                    y=round(w["top"]/3)*3
-                    line_map.setdefault(y,[]).append(w)
-                for tbl in tbl_objs:
-                    for tbl_row in tbl.rows:
-                        row_data=[]
-                        for cell in tbl_row.cells:
-                            if cell is None: row_data.append(""); continue
-                            x0,y0,x1,y1=cell
-                            cell_lines={}
-                            for y,ws in line_map.items():
-                                for w in ws:
-                                    if y0<=w["top"]<=y1 and x0<=w["x0"]<=x1:
-                                        cell_lines.setdefault(round(w["top"],1),[]).append(w["text"])
-                            text="\n".join(" ".join(cell_lines[y]) for y in sorted(cell_lines))
-                            row_data.append(text)
-                        if not any(row_data): continue
-                        if _is_wm(row_data): continue
-                        if _is_hdr(row_data):
-                            if header is None:
-                                header=[clean(v) for v in row_data]; all_rows.append(header)
-                            elif not skip_dup: all_rows.append([clean(v) for v in row_data])
-                            continue
-                        all_rows.append(row_data)
-            else:
-                tables=page.extract_tables(T_TEXT)
-                for t in (tables or []):
-                    for row in t:
-                        r=[clean(v) for v in row]
-                        if not any(r): continue
-                        if _is_wm(r): continue
-                        if _is_hdr(r):
-                            if header is None: header=r; all_rows.append(r)
-                            elif not skip_dup: all_rows.append(r)
-                            continue
-                        all_rows.append(r)
+    all_rows = _fill_date_cols(all_rows)
     return all_rows, strategy
+
+
+def _fill_date_cols(rows):
+    """把日期/星期欄的空白格填入上一列的值（向下填充）"""
+    if len(rows) < 2: return rows
+    header = rows[0]
+    # 找日期欄和星期欄的索引
+    date_cols = []
+    for ci, h in enumerate(header):
+        if any(k in str(h) for k in ["日期","星期","週","week","date"]):
+            date_cols.append(ci)
+    if not date_cols: date_cols = [1, 2]  # 預設欄1和欄2
+    last_vals = {ci: "" for ci in date_cols}
+    result = [header]
+    for row in rows[1:]:
+        new_row = list(row)
+        for ci in date_cols:
+            val = new_row[ci] if ci < len(new_row) else ""
+            if val.strip():
+                last_vals[ci] = val.strip()
+            elif last_vals[ci]:
+                # 空白 → 填入上一列的值
+                while len(new_row) <= ci: new_row.append("")
+                new_row[ci] = last_vals[ci]
+        result.append(new_row)
+    return result
 
 # ══════════════════════════════════════════
 #  模式二：文字座標精準解析
@@ -395,7 +472,7 @@ class App(tk.Tk):
         self.configure(bg=BG)
         self.pdf_files=[]; self.running=False
         self.settings=dict(DEFAULT_SETTINGS)
-        self.out_dir=tk.StringVar(value=os.path.expanduser("~\\Desktop"))
+        self.out_dir=tk.StringVar(value="")  # 預設空白，自動設為來源檔案路徑
         self._build()
 
     def _build(self):
@@ -419,20 +496,36 @@ class App(tk.Tk):
         tk.Label(left,text="選中後按 Delete 可移除",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",pady=(3,0))
 
         # 右：設定面板
-        right=tk.Frame(main,bg=BG,width=320); right.pack(side="right",fill="y",padx=(16,0)); right.pack_propagate(False)
+        # 右側面板用 Canvas + Scrollbar 支援捲動
+        right_outer=tk.Frame(main,bg=BG,width=330); right_outer.pack(side="right",fill="y",padx=(16,0))
+        right_outer.pack_propagate(False)
+        right_canvas=tk.Canvas(right_outer,bg=BG,highlightthickness=0,width=310)
+        right_vsb=tk.Scrollbar(right_outer,orient="vertical",command=right_canvas.yview)
+        right_canvas.configure(yscrollcommand=right_vsb.set)
+        right_vsb.pack(side="right",fill="y")
+        right_canvas.pack(side="left",fill="both",expand=True)
+        right=tk.Frame(right_canvas,bg=BG,width=310)
+        right_win=right_canvas.create_window((0,0),window=right,anchor="nw")
+        def _on_right_resize(e):
+            right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+            right_canvas.itemconfig(right_win,width=right_canvas.winfo_width())
+        right.bind("<Configure>",_on_right_resize)
+        right_canvas.bind("<MouseWheel>",lambda e:right_canvas.yview_scroll(-1*(e.delta//120),"units"))
 
         # 輸出資料夾
         tk.Label(right,text="輸出資料夾",font=("Segoe UI",11,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
         dr=tk.Frame(right,bg=BG); dr.pack(fill="x",pady=(3,8))
         tk.Entry(dr,textvariable=self.out_dir,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",10)).pack(side="left",fill="x",expand=True,ipady=5,padx=(0,4))
         tk.Button(dr,text="瀏覽",font=("Segoe UI",10),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=10,pady=3,command=self.browse_dir).pack(side="right")
+        self.count_lbl=tk.Label(right,text="尚未選擇檔案",font=("Segoe UI",11),bg=BG,fg=TEXT2)
+        self.count_lbl.pack(anchor="w",pady=(2,8))
 
         # 進階設定
         adv=tk.LabelFrame(right,text=" ⚙  進階設定 ",font=("Segoe UI",11,"bold"),bg=BG,fg=TEXT2,bd=1,relief="groove")
         adv.pack(fill="x",pady=(0,8))
 
         # 解析模式
-        tk.Label(adv,text="解析模式",font=("Segoe UI",9),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(6,2))
+        tk.Label(adv,text="解析模式",font=("Segoe UI",11),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(8,2))
         self.mode_var=tk.StringVar(value="auto")
         mf=tk.Frame(adv,bg=BG); mf.pack(fill="x",padx=8,pady=(0,6))
         for val,lbl,tip in [("auto","自動","先試框線，失敗改座標"),
@@ -445,10 +538,10 @@ class App(tk.Tk):
             tk.Label(col,text=tip,font=("Segoe UI",8),bg=BG,fg=TEXT2).pack()
 
         def _row(parent, label, var, tip="", wide=False):
-            tk.Label(parent,text=label,font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(4,1))
+            tk.Label(parent,text=label,font=("Segoe UI",10),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(5,1))
             tk.Entry(parent,textvariable=var,bg=CARD,fg=TEXT,insertbackground="white",
-                     relief="flat",font=("Segoe UI",8)).pack(fill="x",padx=8,ipady=3,pady=(0,1))
-            if tip: tk.Label(parent,text=tip,font=("Segoe UI",7),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(0,3))
+                     relief="flat",font=("Segoe UI",10)).pack(fill="x",padx=8,ipady=4,pady=(0,1))
+            if tip: tk.Label(parent,text=tip,font=("Segoe UI",9),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(0,3))
 
         self.bounds_var=tk.StringVar()
         self.bounds_frame=tk.Frame(adv,bg=BG); self.bounds_frame.pack(fill="x")
@@ -471,17 +564,17 @@ class App(tk.Tk):
         self.skip_dup=tk.BooleanVar(value=True)
         tk.Checkbutton(adv,text="自動刪除重複標題列",variable=self.skip_dup,
                        bg=BG,fg=TEXT,selectcolor=BG2,activebackground=BG,
-                       font=("Segoe UI",9)).pack(anchor="w",padx=8,pady=(2,6))
+                       font=("Segoe UI",11)).pack(anchor="w",padx=8,pady=(4,8))
 
         # 進度條
-        tk.Label(right,text="轉換進度",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
+        tk.Label(right,text="轉換進度",font=("Segoe UI",12,"bold"),bg=BG,fg=TEXT).pack(anchor="w",pady=(4,0))
         s=ttk.Style(); s.theme_use("clam")
         s.configure("P.Horizontal.TProgressbar",troughcolor=CARD,background=ACCENT,
                     darkcolor=ACCENT,lightcolor=ACCENT,bordercolor=BG,thickness=14)
         self.pbar=ttk.Progressbar(right,style="P.Horizontal.TProgressbar",orient="horizontal",mode="determinate")
         self.pbar.pack(fill="x",pady=(3,2))
-        self.pbar_lbl=tk.Label(right,text="",font=("Segoe UI",8),bg=BG,fg=TEXT2)
-        self.pbar_lbl.pack(anchor="w",pady=(0,8))
+        self.pbar_lbl=tk.Label(right,text="",font=("Segoe UI",10),bg=BG,fg=TEXT2)
+        self.pbar_lbl.pack(anchor="w",pady=(2,10))
 
         bc=dict(relief="flat",cursor="hand2")
         tk.Button(right,text="🔍  預覽 / 調整欄位",font=("Segoe UI",12),bg=CARD,fg=TEXT,pady=9,command=self.open_preview,**bc).pack(fill="x",pady=(0,5))
@@ -523,12 +616,21 @@ class App(tk.Tk):
     def add_files(self):
         fs=filedialog.askopenfilenames(title="選擇 PDF",filetypes=[("PDF","*.pdf"),("所有","*.*")])
         for f in fs:
-            if f not in self.pdf_files: self.pdf_files.append(f); self.listbox.insert("end",os.path.basename(f))
+            if f not in self.pdf_files:
+                self.pdf_files.append(f)
+                self.listbox.insert("end",os.path.basename(f))
+                # 自動設定輸出路徑為第一個檔案的資料夾
+                if not self.out_dir.get():
+                    self.out_dir.set(os.path.dirname(f))
+        n=len(self.pdf_files)
+        self.count_lbl.config(text=f"已選 {n} 個 PDF" if n else "尚未選擇檔案")
 
     def remove_sel(self,e=None):
         for i in reversed(self.listbox.curselection()): self.listbox.delete(i); self.pdf_files.pop(i)
 
-    def clear_files(self): self.pdf_files.clear(); self.listbox.delete(0,"end")
+    def clear_files(self):
+        self.pdf_files.clear(); self.listbox.delete(0,"end")
+        self.count_lbl.config(text="尚未選擇檔案")
     def browse_dir(self):
         d=filedialog.askdirectory()
         if d: self.out_dir.set(d)
