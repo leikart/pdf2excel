@@ -10,6 +10,7 @@ PDF 轉 Excel 通用工具 v4
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading, os, re
+from openpyxl import load_workbook as _load_wb
 
 try:
     import pdfplumber
@@ -477,6 +478,106 @@ def convert(pdf_path, out_path, settings, log_cb=None):
     if out_path: write_excel(table,mi,out_path)
     return table, strategy
 
+
+# ════════════════════════════════════════════════════════
+#  比對核心
+# ════════════════════════════════════════════════════════
+
+def load_table_from_file(path, settings, log_cb=None):
+    ext=os.path.splitext(path)[1].lower()
+    if ext==".pdf":
+        if log_cb: log_cb(f"  轉換 PDF：{os.path.basename(path)}")
+        table,_=convert(path, None, settings, log_cb=log_cb)
+        return table
+    elif ext in (".xlsx",".xls"):
+        if log_cb: log_cb(f"  載入 Excel：{os.path.basename(path)}")
+        wb=_load_wb(path, data_only=True)
+        ws=wb.active
+        rows=[]
+        for row in ws.iter_rows(values_only=True):
+            r=[clean(v) for v in row]
+            if any(r): rows.append(r)
+        return rows
+    else:
+        raise ValueError(f"不支援的格式：{ext}")
+
+def compare_tables(table_a, table_b, compare_cols):
+    data_a=table_a[1:] if len(table_a)>1 else []
+    data_b=table_b[1:] if len(table_b)>1 else []
+    header=table_a[0] if table_a else []
+    max_len=max(len(data_a),len(data_b))
+    results=[]
+    for i in range(max_len):
+        row_a=data_a[i] if i<len(data_a) else None
+        row_b=data_b[i] if i<len(data_b) else None
+        if row_a is None:
+            results.append({"type":"add","row_a":None,"row_b":row_b,"diffs":[],"idx":i})
+        elif row_b is None:
+            results.append({"type":"delete","row_a":row_a,"row_b":None,"diffs":[],"idx":i})
+        else:
+            diffs=[]
+            for ci in compare_cols:
+                va=row_a[ci] if ci<len(row_a) else ""
+                vb=row_b[ci] if ci<len(row_b) else ""
+                if clean(va)!=clean(vb):
+                    col_name=header[ci] if ci<len(header) else f"欄{ci+1}"
+                    diffs.append((ci,col_name,clean(va),clean(vb)))
+            t="modify" if diffs else "match"
+            results.append({"type":t,"row_a":row_a,"row_b":row_b,"diffs":diffs,"idx":i})
+    return results, header
+
+def write_diff_excel(results, header, compare_cols, out_path):
+    wb=Workbook(); ws=wb.active; ws.title="差異報告"
+    hfill=PatternFill(start_color="0F3460",end_color="0F3460",fill_type="solid")
+    hfont=Font(color="FFFFFF",bold=True,size=11)
+    fills={"add":PatternFill(start_color="C6EFCE",end_color="C6EFCE",fill_type="solid"),
+           "delete":PatternFill(start_color="FFC7CE",end_color="FFC7CE",fill_type="solid"),
+           "modify":PatternFill(start_color="FFEB9C",end_color="FFEB9C",fill_type="solid")}
+    thin=Side(style="thin")
+    bdr=Border(left=thin,right=thin,top=thin,bottom=thin)
+    ctr=Alignment(horizontal="center",vertical="top",wrap_text=True)
+    lwrap=Alignment(horizontal="left",vertical="top",wrap_text=True)
+    col_names_a=[f"{header[ci] if ci<len(header) else f'欄{ci+1}'}\n（檔案A）" for ci in compare_cols]
+    col_names_b=[f"{header[ci] if ci<len(header) else f'欄{ci+1}'}\n（檔案B）" for ci in compare_cols]
+    hdr_row=["差異類型","列號"]+col_names_a+col_names_b+["差異說明"]
+    for ci,h in enumerate(hdr_row,1):
+        c=ws.cell(row=1,column=ci,value=h)
+        c.fill=hfill; c.font=hfont; c.border=bdr; c.alignment=ctr
+    ws.row_dimensions[1].height=30
+    ri=2
+    type_map={"add":"新增","delete":"刪除","modify":"修改"}
+    for res in results:
+        t=res["type"]
+        if t=="match": continue
+        row_a=res["row_a"] or []; row_b=res["row_b"] or []
+        idx=res["idx"]+2
+        if t=="add": desc=f"第{idx}列：檔案B新增此列"
+        elif t=="delete": desc=f"第{idx}列：此列在檔案B中已刪除"
+        else:
+            parts=[f"【{cn}】A=「{va}」→ B=「{vb}」" for _,cn,va,vb in res["diffs"]]
+            desc=f"第{idx}列修改：\n"+"\n".join(parts)
+        vals_a=[clean(row_a[ci]) if ci<len(row_a) else "" for ci in compare_cols]
+        vals_b=[clean(row_b[ci]) if ci<len(row_b) else "" for ci in compare_cols]
+        row_data=[type_map[t],idx]+vals_a+vals_b+[desc]
+        nl=desc.count("\n")+1
+        ws.row_dimensions[ri].height=max(18,15*nl)
+        for ci,val in enumerate(row_data,1):
+            c=ws.cell(row=ri,column=ci,value=val)
+            c.fill=fills.get(t,fills["modify"]); c.border=bdr
+            c.alignment=ctr if ci<=2 else lwrap; c.font=Font(size=10)
+        ri+=1
+    if ri==2:
+        c=ws.cell(row=2,column=1,value="✅ 兩份檔案在選擇的欄位中完全相同")
+        c.font=Font(size=12,bold=True,color="375623")
+    ws.column_dimensions["A"].width=10
+    ws.column_dimensions["B"].width=8
+    ncol=len(compare_cols)
+    for i in range(ncol*2):
+        ws.column_dimensions[get_column_letter(3+i)].width=24
+    ws.column_dimensions[get_column_letter(3+ncol*2)].width=55
+    ws.freeze_panes="A2"
+    wb.save(out_path)
+
 # ══════════════════════════════════════════
 #  GUI
 # ══════════════════════════════════════════
@@ -484,12 +585,12 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PDF 轉 Excel 通用工具 v4")
-        self.geometry("1100x780"); self.minsize(960,660)
         self.configure(bg=BG)
+        self.after(0, lambda: self.state("zoomed"))
+        self.minsize(1000,700)
         self.pdf_files=[]; self.running=False
         self.settings=dict(DEFAULT_SETTINGS)
-        self.out_dir=tk.StringVar(value="")  # 預設空白，自動設為來源檔案路徑
-        # Style 初始化提前，避免 _build_ui 裡延遲渲染
+        self.out_dir=tk.StringVar(value="")
         s=ttk.Style(); s.theme_use("clam")
         s.configure("P.Horizontal.TProgressbar",troughcolor=CARD,background=ACCENT,
                     darkcolor=ACCENT,lightcolor=ACCENT,bordercolor=BG,thickness=14)
@@ -497,6 +598,15 @@ class App(tk.Tk):
                     fieldbackground=CARD,font=("Segoe UI",11),rowheight=26)
         s.configure("Treeview.Heading",background=BG2,foreground=TEXT,
                     font=("Segoe UI",11,"bold"))
+        # 分頁 Notebook 樣式
+        s.configure("App.TNotebook",background=BG,borderwidth=0,tabmargins=0)
+        s.configure("App.TNotebook.Tab",
+                    background=BG2,foreground=TEXT2,
+                    font=("Segoe UI",12,"bold"),
+                    padding=(24,10),borderwidth=0)
+        s.map("App.TNotebook.Tab",
+              background=[("selected",CARD),("active","#1A3050")],
+              foreground=[("selected","white"),("active",TEXT)])
         self._build()
 
     # ── 輔助：分隔線 ─────────────────────────────
@@ -505,7 +615,7 @@ class App(tk.Tk):
 
     # ── 輔助：區塊標題 ───────────────────────────
     def _section(self, parent, text):
-        tk.Label(parent,text=text,font=("Segoe UI",10,"bold"),
+        tk.Label(parent,text=text,font=("Segoe UI",12,"bold"),
                  bg=BG,fg=TEXT2).pack(anchor="w",pady=10)
 
     # ── 輔助：帶底色的卡片 Frame ─────────────────
@@ -517,18 +627,32 @@ class App(tk.Tk):
     def _build(self):
         # ══ 頂部標題列 ════════════════════════════
         hdr=tk.Frame(self,bg=CARD,height=64); hdr.pack(fill="x"); hdr.pack_propagate(False)
-        # 左側：圖示 + 標題
         tk.Label(hdr,text="⬛",font=("Segoe UI",18),bg=ACCENT,fg="white",
                  width=3).pack(side="left",fill="y")
         tk.Label(hdr,text=" PDF  →  Excel",font=("Segoe UI",20,"bold"),
                  bg=CARD,fg="white").pack(side="left",padx=(8,0),pady=14)
-        # 右側：版本標籤
         tk.Label(hdr,text="v4",font=("Segoe UI",9),bg="#1A3050",fg=TEXT2,
-                 padx=8,pady=4).pack(side="right",padx=14,pady=18)
+                 padx=8).pack(side="right",padx=14,pady=18)
         tk.Label(hdr,text="通用版・混合模式解析",font=("Segoe UI",10),
                  bg=CARD,fg=TEXT2).pack(side="right",padx=0,pady=18)
 
-        main=tk.Frame(self,bg=BG); main.pack(fill="both",expand=True,padx=14,pady=10)
+        # ══ 分頁 Notebook ═════════════════════════
+        self.nb=ttk.Notebook(self,style="App.TNotebook")
+        self.nb.pack(fill="both",expand=True,padx=0,pady=0)
+
+        # 頁籤1：轉換
+        self.tab_convert=tk.Frame(self.nb,bg=BG)
+        self.nb.add(self.tab_convert,text="  📄  PDF 轉 Excel  ")
+
+        # 頁籤2：比對
+        self.tab_compare=tk.Frame(self.nb,bg=BG)
+        self.nb.add(self.tab_compare,text="  🔍  檔案比對  ")
+
+        self._build_convert_tab(self.tab_convert)
+        self._build_compare_tab(self.tab_compare)
+
+    def _build_convert_tab(self, parent):
+        main=tk.Frame(parent,bg=BG); main.pack(fill="both",expand=True,padx=14,pady=10)
 
         # ══ 左側：PDF 清單 ════════════════════════
         left=tk.Frame(main,bg=BG); left.pack(side="left",fill="both",expand=True)
@@ -556,24 +680,37 @@ class App(tk.Tk):
         tk.Label(left,text="💡 選中後按 Delete 可移除",font=("Segoe UI",9),
                  bg=BG,fg="#4A6080").pack(anchor="w",pady=4)
 
-        # ══ 右側：設定面板 ════════════════════════
-        right=tk.Frame(main,bg=BG,width=340)
-        right.pack(side="right",fill="y",padx=(14,0))
-        right.pack_propagate(False)
+        # ══ 右側：設定面板（可捲動）════════════════
+        right_wrap=tk.Frame(main,bg=BG,width=360)
+        right_wrap.pack(side="right",fill="y",padx=(14,0))
+        right_wrap.pack_propagate(False)
+        right_canvas=tk.Canvas(right_wrap,bg=BG,highlightthickness=0,width=340)
+        right_sb=tk.Scrollbar(right_wrap,orient="vertical",command=right_canvas.yview)
+        right_canvas.configure(yscrollcommand=right_sb.set)
+        right_sb.pack(side="right",fill="y")
+        right_canvas.pack(side="left",fill="both",expand=True)
+        right=tk.Frame(right_canvas,bg=BG)
+        right_id=right_canvas.create_window((0,0),window=right,anchor="nw",width=340)
+        def _update_scroll(e=None):
+            right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+        right.bind("<Configure>",_update_scroll)
+        def _scroll(e): right_canvas.yview_scroll(-1*(e.delta//120),"units")
+        right_canvas.bind("<MouseWheel>",_scroll)
+        right_wrap.bind("<MouseWheel>",_scroll)
 
         # ── 輸出資料夾 ───────────────────────────
         self._section(right,"📁  輸出資料夾")
         out_card=tk.Frame(right,bg=CARD); out_card.pack(fill="x",pady=2)
         tk.Entry(out_card,textvariable=self.out_dir,bg=CARD,fg=TEXT,
                  insertbackground="white",relief="flat",
-                 font=("Segoe UI",10)).pack(side="left",fill="x",expand=True,
-                                            ipady=7,padx=(10,4),pady=4)
-        tk.Button(out_card,text="瀏覽",font=("Segoe UI",10),
+                 font=("Segoe UI",11)).pack(side="left",fill="x",expand=True,
+                                            ipady=8,padx=(10,4),pady=5)
+        tk.Button(out_card,text="瀏覽",font=("Segoe UI",11),
                   bg="#1E3A58",fg=TEXT2,relief="flat",cursor="hand2",
-                  padx=10,pady=4,command=self.browse_dir).pack(side="right",padx=4,pady=4)
+                  padx=12,pady=5,command=self.browse_dir).pack(side="right",padx=4,pady=4)
 
         self.count_lbl=tk.Label(right,text="尚未選擇檔案",
-                                font=("Segoe UI",10),bg=BG,fg="#4A7090")
+                                font=("Segoe UI",11),bg=BG,fg="#4A7090")
         self.count_lbl.pack(anchor="w",pady=(4,0))
 
         self._sep(right)
@@ -594,7 +731,7 @@ class App(tk.Tk):
             btn=tk.Label(card,text=lbl,font=("Segoe UI",11,"bold"),
                          bg=CARD,fg=TEXT2,padx=10,pady=10,cursor="hand2")
             btn.pack(fill="x")
-            sub=tk.Label(card,text=tip,font=("Segoe UI",9),
+            sub=tk.Label(card,text=tip,font=("Segoe UI",10),
                          bg=CARD,fg="#4A6080",padx=10,pady=8)
             sub.pack(fill="x",anchor="w")
             self._type_btns[val]=(card,btn,sub)
@@ -608,10 +745,10 @@ class App(tk.Tk):
         adv_hdr=tk.Frame(right,bg="#0D1F30",cursor="hand2")
         adv_hdr.pack(fill="x")
         self._adv_arrow=tk.Label(adv_hdr,text="▶  進階設定",
-                                  font=("Segoe UI",10,"bold"),
+                                  font=("Segoe UI",12,"bold"),
                                   bg="#0D1F30",fg=TEXT2,cursor="hand2")
-        self._adv_arrow.pack(side="left",padx=12,pady=7)
-        tk.Label(adv_hdr,text="（選填）",font=("Segoe UI",9),
+        self._adv_arrow.pack(side="left",padx=12,pady=8)
+        tk.Label(adv_hdr,text="（選填）",font=("Segoe UI",10),
                  bg="#0D1F30",fg="#3A5070").pack(side="left")
         for w in (adv_hdr, self._adv_arrow):
             w.bind("<Button-1>",self._toggle_adv)
@@ -633,19 +770,19 @@ class App(tk.Tk):
             tk.Radiobutton(row,text=lbl,variable=self.mode_var,value=val,
                            bg="#0D1F30",fg=TEXT,selectcolor="#1A3050",
                            activebackground="#0D1F30",
-                           font=("Segoe UI",10,"bold"),
+                           font=("Segoe UI",11,"bold"),
                            command=self._on_mode,width=9,anchor="w").pack(side="left")
-            tk.Label(row,text=tip,font=("Segoe UI",9),
+            tk.Label(row,text=tip,font=("Segoe UI",10),
                      bg="#0D1F30",fg="#4A6080").pack(side="left",padx=(4,0))
 
         def _row(parent, label, var, tip=""):
-            tk.Label(parent,text=label,font=("Segoe UI",9),
+            tk.Label(parent,text=label,font=("Segoe UI",11),
                      bg="#0D1F30",fg=TEXT2).pack(anchor="w",padx=12,pady=8)
             tk.Entry(parent,textvariable=var,bg="#0A1828",fg=TEXT,
                      insertbackground="white",relief="flat",
-                     font=("Segoe UI",10)).pack(fill="x",padx=12,ipady=5,pady=1)
+                     font=("Segoe UI",11)).pack(fill="x",padx=12,ipady=6,pady=1)
             if tip:
-                tk.Label(parent,text=tip,font=("Segoe UI",8),
+                tk.Label(parent,text=tip,font=("Segoe UI",9),
                          bg="#0D1F30",fg="#3A5070").pack(anchor="w",padx=12,pady=2)
 
         self.bounds_var=tk.StringVar()
@@ -675,8 +812,8 @@ class App(tk.Tk):
                           variable=self.skip_dup,
                           bg="#0D1F30",fg=TEXT,selectcolor="#1A3050",
                           activebackground="#0D1F30",
-                          font=("Segoe UI",10))
-        ck.pack(anchor="w",padx=12,pady=(8,10))
+                          font=("Segoe UI",11))
+        ck.pack(anchor="w",padx=12,pady=(10,12))
 
         self._sep(right)
 
@@ -687,25 +824,24 @@ class App(tk.Tk):
         self.pbar=ttk.Progressbar(prog_frame,style="P.Horizontal.TProgressbar",
                                    orient="horizontal",mode="determinate")
         self.pbar.pack(fill="x",pady=(4,2))
-        self.pbar_lbl=tk.Label(prog_frame,text="",font=("Segoe UI",10),
+        self.pbar_lbl=tk.Label(prog_frame,text="",font=("Segoe UI",11),
                                 bg=BG,fg=TEXT2)
         self.pbar_lbl.pack(anchor="w")
 
         # ── 操作按鈕 ─────────────────────────────
         bc=dict(relief="flat",cursor="hand2")
         tk.Button(right,text="🔍  預覽 / 調整欄位",
-                  font=("Segoe UI",11),bg="#1E3A58",fg=TEXT,
-                  pady=9,command=self.open_preview,**bc).pack(fill="x",pady=(0,5))
+                  font=("Segoe UI",12),bg="#1E3A58",fg=TEXT,
+                  pady=10,command=self.open_preview,**bc).pack(fill="x",pady=(0,6))
         self.btn_start=tk.Button(right,text="▶  開始批次轉換",
-                                  font=("Segoe UI",14,"bold"),
-                                  bg=ACCENT,fg="white",pady=12,
+                                  font=("Segoe UI",15,"bold"),
+                                  bg=ACCENT,fg="white",pady=14,
                                   command=self.start_convert,**bc)
-        self.btn_start.pack(fill="x",pady=(0,5))
+        self.btn_start.pack(fill="x",pady=(0,6))
         tk.Button(right,text="📂  開啟輸出資料夾",
-                  font=("Segoe UI",10),bg=BG2,fg=TEXT2,
-                  pady=7,command=self.open_out,**bc).pack(fill="x")
-        # 所有元件建立完後才設定初始選中狀態
-        self.after(0, lambda: self._select_doc_type("other"))
+                  font=("Segoe UI",11),bg=BG2,fg=TEXT2,
+                  pady=8,command=self.open_out,**bc).pack(fill="x",pady=(0,8))
+
 
         # Log
         logf=tk.Frame(self,bg=BG2,height=148); logf.pack(fill="x",padx=16,pady=10); logf.pack_propagate(False)
@@ -718,6 +854,198 @@ class App(tk.Tk):
         self.log_box.tag_config("ok",foreground=SUCCESS)
         self.log_box.tag_config("err",foreground=ERROR)
         self.log_box.tag_config("warn",foreground=WARNING)
+
+        # 所有元件建立完後才設定初始選中
+        self.after(0, lambda: self._select_doc_type("other"))
+
+    def _build_compare_tab(self, parent):
+        """比對頁籤"""
+        self._cmp_file_a=tk.StringVar()
+        self._cmp_file_b=tk.StringVar()
+        self._cmp_table_a=None
+        self._cmp_table_b=None
+        self._cmp_header=[]
+        self._cmp_col_vars=[]   # Checkbutton 變數
+        self._cmp_results=None
+
+        # ── 上半：檔案選擇 ──────────────────────
+        top=tk.Frame(parent,bg=BG); top.pack(fill="x",padx=16,pady=(12,6))
+        tk.Label(top,text="檔案比對",font=("Segoe UI",16,"bold"),
+                 bg=BG,fg=TEXT).pack(anchor="w",pady=(0,8))
+
+        files_row=tk.Frame(top,bg=BG); files_row.pack(fill="x")
+        for i,(lbl,var_attr) in enumerate([("📄 檔案 A（舊版）","_cmp_file_a"),
+                                            ("📄 檔案 B（新版）","_cmp_file_b")]):
+            col=tk.Frame(files_row,bg=CARD); col.pack(side="left",fill="x",expand=True,padx=(0,8) if i==0 else 0)
+            tk.Label(col,text=lbl,font=("Segoe UI",11,"bold"),
+                     bg=CARD,fg=TEXT2,padx=12).pack(anchor="w",pady=(8,2))
+            row=tk.Frame(col,bg=CARD); row.pack(fill="x",padx=8,pady=(0,8))
+            var=getattr(self,var_attr)
+            tk.Entry(row,textvariable=var,bg="#0A1828",fg=TEXT,
+                     insertbackground="white",relief="flat",
+                     font=("Segoe UI",10),state="readonly").pack(side="left",fill="x",expand=True,ipady=6)
+            tk.Button(row,text="選擇",font=("Segoe UI",10),
+                      bg=ACCENT,fg="white",relief="flat",cursor="hand2",
+                      padx=10,pady=4,
+                      command=lambda v=var_attr: self._cmp_pick_file(v)
+                      ).pack(side="right",padx=(6,0))
+
+        # ── 載入按鈕 ────────────────────────────
+        load_row=tk.Frame(top,bg=BG); load_row.pack(fill="x",pady=(8,0))
+        tk.Button(load_row,text="📂  載入兩份檔案，選擇比對欄位",
+                  font=("Segoe UI",12,"bold"),
+                  bg="#1E3A58",fg=TEXT,relief="flat",cursor="hand2",
+                  pady=10,command=self._cmp_load).pack(side="left",padx=(0,10))
+        self._cmp_status=tk.Label(load_row,text="請先選擇兩份檔案",
+                                   font=("Segoe UI",11),bg=BG,fg=TEXT2)
+        self._cmp_status.pack(side="left")
+
+        tk.Frame(parent,bg="#2A3A50",height=1).pack(fill="x",padx=16,pady=6)
+
+        # ── 中：欄位選擇 ────────────────────────
+        mid=tk.Frame(parent,bg=BG); mid.pack(fill="x",padx=16,pady=(0,6))
+        tk.Label(mid,text="選擇比對欄位",font=("Segoe UI",12,"bold"),
+                 bg=BG,fg=TEXT).pack(anchor="w",pady=(0,6))
+        self._cmp_col_frame=tk.Frame(mid,bg=BG)
+        self._cmp_col_frame.pack(fill="x")
+        tk.Label(self._cmp_col_frame,text="（載入檔案後顯示）",
+                 font=("Segoe UI",11),bg=BG,fg="#4A6080").pack(anchor="w")
+
+        tk.Frame(parent,bg="#2A3A50",height=1).pack(fill="x",padx=16,pady=6)
+
+        # ── 下半：比對結果預覽 ──────────────────
+        bot_top=tk.Frame(parent,bg=BG); bot_top.pack(fill="x",padx=16,pady=(0,4))
+        tk.Label(bot_top,text="比對結果",font=("Segoe UI",12,"bold"),
+                 bg=BG,fg=TEXT).pack(side="left")
+        self._cmp_summary=tk.Label(bot_top,text="",font=("Segoe UI",11),
+                                    bg=BG,fg=TEXT2)
+        self._cmp_summary.pack(side="left",padx=(12,0))
+        bc=dict(relief="flat",cursor="hand2")
+        tk.Button(bot_top,text="▶  開始比對",font=("Segoe UI",12,"bold"),
+                  bg=ACCENT,fg="white",pady=7,padx=16,
+                  command=self._cmp_run,**bc).pack(side="right")
+        tk.Button(bot_top,text="💾  匯出差異報告 Excel",
+                  font=("Segoe UI",11),bg="#1E3A58",fg=TEXT,
+                  pady=7,padx=12,command=self._cmp_export,**bc).pack(side="right",padx=(0,8))
+
+        # 結果表格
+        res_frame=tk.Frame(parent,bg=BG); res_frame.pack(fill="both",expand=True,padx=16,pady=(0,12))
+        self._cmp_tree_cols=["列號","差異類型","差異說明"]
+        self._cmp_tree=ttk.Treeview(res_frame,columns=self._cmp_tree_cols,
+                                     show="headings",height=15)
+        for c,w in zip(self._cmp_tree_cols,[60,80,900]):
+            self._cmp_tree.heading(c,text=c)
+            self._cmp_tree.column(c,width=w,anchor="w")
+        cvsb=ttk.Scrollbar(res_frame,orient="vertical",command=self._cmp_tree.yview)
+        chsb=ttk.Scrollbar(res_frame,orient="horizontal",command=self._cmp_tree.xview)
+        self._cmp_tree.configure(yscrollcommand=cvsb.set,xscrollcommand=chsb.set)
+        self._cmp_tree.grid(row=0,column=0,sticky="nsew")
+        cvsb.grid(row=0,column=1,sticky="ns")
+        chsb.grid(row=1,column=0,sticky="ew")
+        res_frame.rowconfigure(0,weight=1); res_frame.columnconfigure(0,weight=1)
+        self._cmp_tree.tag_configure("add",foreground="#1E8449")
+        self._cmp_tree.tag_configure("delete",foreground="#C0392B")
+        self._cmp_tree.tag_configure("modify",foreground="#B7950B")
+        self._cmp_tree.tag_configure("match",foreground="#4A6080")
+
+    # ── 比對頁籤操作函式 ─────────────────────────
+    def _cmp_pick_file(self, var_attr):
+        f=filedialog.askopenfilename(
+            title="選擇檔案",
+            filetypes=[("PDF/Excel","*.pdf *.xlsx *.xls"),("所有","*.*")])
+        if f: getattr(self,var_attr).set(f)
+
+    def _cmp_load(self):
+        fa=self._cmp_file_a.get(); fb=self._cmp_file_b.get()
+        if not fa or not fb:
+            messagebox.showwarning("提示","請先選擇兩份檔案！"); return
+        self._cmp_status.config(text="載入中...")
+        def _load():
+            try:
+                s=self._get_settings()
+                ta=load_table_from_file(fa,s)
+                tb=load_table_from_file(fb,s)
+                self._cmp_table_a=ta
+                self._cmp_table_b=tb
+                header=ta[0] if ta else (tb[0] if tb else [])
+                self._cmp_header=header
+                self.after(0,lambda:self._cmp_show_cols(header))
+                self.after(0,lambda:self._cmp_status.config(
+                    text=f"✅ 已載入  A：{len(ta)-1}列  B：{len(tb)-1}列"))
+            except Exception as e:
+                self.after(0,lambda:self._cmp_status.config(text=f"❌ {e}"))
+        threading.Thread(target=_load,daemon=True).start()
+
+    def _cmp_show_cols(self, header):
+        for w in self._cmp_col_frame.winfo_children(): w.destroy()
+        self._cmp_col_vars=[]
+        if not header:
+            tk.Label(self._cmp_col_frame,text="找不到標題列",
+                     font=("Segoe UI",11),bg=BG,fg=ERROR).pack(anchor="w"); return
+        tk.Label(self._cmp_col_frame,
+                 text="勾選要比對的欄位（未勾選的欄位不納入比對）：",
+                 font=("Segoe UI",11),bg=BG,fg=TEXT2).pack(anchor="w",pady=(0,6))
+        grid=tk.Frame(self._cmp_col_frame,bg=BG); grid.pack(fill="x")
+        for ci,h in enumerate(header):
+            v=tk.BooleanVar(value=False)
+            self._cmp_col_vars.append(v)
+            row,col=divmod(ci,4)
+            cb=tk.Checkbutton(grid,text=f"  {h or f'欄{ci+1}'}",
+                               variable=v,bg=BG,fg=TEXT,
+                               selectcolor=CARD,activebackground=BG,
+                               font=("Segoe UI",11))
+            cb.grid(row=row,column=col,sticky="w",padx=(0,16),pady=2)
+
+    def _cmp_run(self):
+        if not self._cmp_table_a or not self._cmp_table_b:
+            messagebox.showwarning("提示","請先載入兩份檔案！"); return
+        cols=[i for i,v in enumerate(self._cmp_col_vars) if v.get()]
+        if not cols:
+            messagebox.showwarning("提示","請至少勾選一個比對欄位！"); return
+        results,header=compare_tables(self._cmp_table_a,self._cmp_table_b,cols)
+        self._cmp_results=results
+        self._cmp_compare_cols=cols
+        # 顯示結果
+        tree=self._cmp_tree
+        tree.delete(*tree.get_children())
+        cnt={"add":0,"delete":0,"modify":0,"match":0}
+        type_map={"add":"新增","delete":"刪除","modify":"修改","match":"相同"}
+        for res in results:
+            t=res["type"]; cnt[t]+=1
+            if t=="match": continue
+            idx=res["idx"]+2
+            row_a=res["row_a"] or []; row_b=res["row_b"] or []
+            if t=="add":
+                desc=f"檔案B第{idx}列新增："+", ".join(
+                    f"{header[c] if c<len(header) else f'欄{c+1}'}=「{clean(row_b[c]) if c<len(row_b) else ''}」"
+                    for c in cols)
+            elif t=="delete":
+                desc=f"第{idx}列已從檔案B刪除："+", ".join(
+                    f"{header[c] if c<len(header) else f'欄{c+1}'}=「{clean(row_a[c]) if c<len(row_a) else ''}」"
+                    for c in cols)
+            else:
+                parts=[f"【{cn}】「{va}」→「{vb}」" for _,cn,va,vb in res["diffs"]]
+                desc="  |  ".join(parts)
+            tree.insert("","end",values=(idx,type_map[t],desc),tags=(t,))
+        total=cnt["add"]+cnt["delete"]+cnt["modify"]
+        self._cmp_summary.config(
+            text=f"共 {total} 筆差異  新增 {cnt['add']}  刪除 {cnt['delete']}  修改 {cnt['modify']}  相同 {cnt['match']}",
+            fg=ACCENT if total>0 else SUCCESS)
+
+    def _cmp_export(self):
+        if not self._cmp_results:
+            messagebox.showwarning("提示","請先執行比對！"); return
+        out=filedialog.asksaveasfilename(
+            title="儲存差異報告",defaultextension=".xlsx",
+            initialfile="差異報告.xlsx",filetypes=[("Excel","*.xlsx")])
+        if not out: return
+        try:
+            write_diff_excel(self._cmp_results,self._cmp_header,
+                             self._cmp_compare_cols,out)
+            messagebox.showinfo("完成",f"已儲存：\n{out}")
+            os.startfile(os.path.dirname(out))
+        except Exception as e:
+            messagebox.showerror("錯誤",str(e))
 
     def _on_mode(self):
         m=self.mode_var.get()
