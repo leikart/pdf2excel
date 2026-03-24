@@ -601,8 +601,6 @@ class App(tk.Tk):
             for w in (card,btn,sub):
                 w.bind("<Button-1>",lambda e,v=val: self._select_doc_type(v))
 
-        self._select_doc_type("other")  # 初始選中
-
         self._sep(right)
 
         # ── 進階設定（可展開）───────────────────
@@ -706,6 +704,8 @@ class App(tk.Tk):
         tk.Button(right,text="📂  開啟輸出資料夾",
                   font=("Segoe UI",10),bg=BG2,fg=TEXT2,
                   pady=7,command=self.open_out,**bc).pack(fill="x")
+        # 所有元件建立完後才設定初始選中狀態
+        self.after(0, lambda: self._select_doc_type("other"))
 
         # Log
         logf=tk.Frame(self,bg=BG2,height=148); logf.pack(fill="x",padx=16,pady=10); logf.pack_propagate(False)
@@ -744,6 +744,9 @@ class App(tk.Tk):
 
     def _on_doc_type(self):
         """套用文件類型對應的預設設定"""
+        # 尚未完成建構時不執行（避免存取未建立的屬性）
+        if not hasattr(self,"wm_var") or not hasattr(self,"skip_dup"):
+            return
         t=self.doc_type.get()
         if t=="shipment":
             self.skip_dup.set(True)
