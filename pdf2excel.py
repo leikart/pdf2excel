@@ -506,7 +506,7 @@ class App(tk.Tk):
     # ── 輔助：區塊標題 ───────────────────────────
     def _section(self, parent, text):
         tk.Label(parent,text=text,font=("Segoe UI",10,"bold"),
-                 bg=BG,fg=TEXT2).pack(anchor="w",pady=(10,4))
+                 bg=BG,fg=TEXT2).pack(anchor="w",pady=10)
 
     # ── 輔助：帶底色的卡片 Frame ─────────────────
     def _card(self, parent, bg=None, pad=10):
@@ -533,7 +533,7 @@ class App(tk.Tk):
         # ══ 左側：PDF 清單 ════════════════════════
         left=tk.Frame(main,bg=BG); left.pack(side="left",fill="both",expand=True)
 
-        r1=tk.Frame(left,bg=BG); r1.pack(fill="x",pady=(0,6))
+        r1=tk.Frame(left,bg=BG); r1.pack(fill="x",pady=6)
         tk.Label(r1,text="PDF 檔案",font=("Segoe UI",12,"bold"),bg=BG,fg=TEXT).pack(side="left")
         tk.Button(r1,text="  ＋  新增檔案  ",font=("Segoe UI",10,"bold"),
                   bg=ACCENT,fg="white",relief="flat",cursor="hand2",pady=5,
@@ -554,7 +554,7 @@ class App(tk.Tk):
         sb.config(command=self.listbox.yview)
         self.listbox.bind("<Delete>",self.remove_sel)
         tk.Label(left,text="💡 選中後按 Delete 可移除",font=("Segoe UI",9),
-                 bg=BG,fg="#4A6080").pack(anchor="w",pady=(4,0))
+                 bg=BG,fg="#4A6080").pack(anchor="w",pady=4)
 
         # ══ 右側：設定面板 ════════════════════════
         right=tk.Frame(main,bg=BG,width=340)
@@ -563,7 +563,7 @@ class App(tk.Tk):
 
         # ── 輸出資料夾 ───────────────────────────
         self._section(right,"📁  輸出資料夾")
-        out_card=tk.Frame(right,bg=CARD); out_card.pack(fill="x",pady=(0,2))
+        out_card=tk.Frame(right,bg=CARD); out_card.pack(fill="x",pady=2)
         tk.Entry(out_card,textvariable=self.out_dir,bg=CARD,fg=TEXT,
                  insertbackground="white",relief="flat",
                  font=("Segoe UI",10)).pack(side="left",fill="x",expand=True,
@@ -583,7 +583,7 @@ class App(tk.Tk):
         self.doc_type=tk.StringVar(value="other")
         self._type_btns={}
 
-        type_frame=tk.Frame(right,bg=BG); type_frame.pack(fill="x",pady=(0,4))
+        type_frame=tk.Frame(right,bg=BG); type_frame.pack(fill="x",pady=4)
         type_defs=[
             ("shipment","📦 出貨順序","浮水印過濾・日期合併"),
             ("other",   "📄 其他",    "單純轉檔"),
@@ -595,7 +595,7 @@ class App(tk.Tk):
                          bg=CARD,fg=TEXT2,padx=10,pady=10,cursor="hand2")
             btn.pack(fill="x")
             sub=tk.Label(card,text=tip,font=("Segoe UI",9),
-                         bg=CARD,fg="#4A6080",padx=10,pady=(0,8))
+                         bg=CARD,fg="#4A6080",padx=10,pady=8)
             sub.pack(fill="x",anchor="w")
             self._type_btns[val]=(card,btn,sub)
             for w in (card,btn,sub):
@@ -623,7 +623,7 @@ class App(tk.Tk):
 
         # 解析模式（每個選項獨立一列，不擠在一起）
         tk.Label(adv,text="解析模式",font=("Segoe UI",10,"bold"),
-                 bg="#0D1F30",fg=TEXT2).pack(anchor="w",padx=12,pady=(10,4))
+                 bg="#0D1F30",fg=TEXT2).pack(anchor="w",padx=12,pady=10)
         self.mode_var=tk.StringVar(value="auto")
         mode_defs=[
             ("auto",   "自動",    "先試框線偵測，失敗改用文字座標"),
@@ -642,13 +642,13 @@ class App(tk.Tk):
 
         def _row(parent, label, var, tip=""):
             tk.Label(parent,text=label,font=("Segoe UI",9),
-                     bg="#0D1F30",fg=TEXT2).pack(anchor="w",padx=12,pady=(8,1))
+                     bg="#0D1F30",fg=TEXT2).pack(anchor="w",padx=12,pady=8)
             tk.Entry(parent,textvariable=var,bg="#0A1828",fg=TEXT,
                      insertbackground="white",relief="flat",
-                     font=("Segoe UI",10)).pack(fill="x",padx=12,ipady=5,pady=(0,1))
+                     font=("Segoe UI",10)).pack(fill="x",padx=12,ipady=5,pady=1)
             if tip:
                 tk.Label(parent,text=tip,font=("Segoe UI",8),
-                         bg="#0D1F30",fg="#3A5070").pack(anchor="w",padx=12,pady=(0,2))
+                         bg="#0D1F30",fg="#3A5070").pack(anchor="w",padx=12,pady=2)
 
         self.bounds_var=tk.StringVar()
         self.bounds_frame=tk.Frame(adv,bg="#0D1F30")
@@ -683,7 +683,7 @@ class App(tk.Tk):
         self._sep(right)
 
         # ── 進度條 ───────────────────────────────
-        prog_frame=tk.Frame(right,bg=BG); prog_frame.pack(fill="x",pady=(2,8))
+        prog_frame=tk.Frame(right,bg=BG); prog_frame.pack(fill="x",pady=8)
         tk.Label(prog_frame,text="轉換進度",font=("Segoe UI",10,"bold"),
                  bg=BG,fg=TEXT2).pack(anchor="w")
         self.pbar=ttk.Progressbar(prog_frame,style="P.Horizontal.TProgressbar",
@@ -708,8 +708,8 @@ class App(tk.Tk):
                   pady=7,command=self.open_out,**bc).pack(fill="x")
 
         # Log
-        logf=tk.Frame(self,bg=BG2,height=148); logf.pack(fill="x",padx=16,pady=(0,10)); logf.pack_propagate(False)
-        tk.Label(logf,text="執行記錄",font=("Segoe UI",11,"bold"),bg=BG2,fg=TEXT2).pack(anchor="w",padx=10,pady=(6,0))
+        logf=tk.Frame(self,bg=BG2,height=148); logf.pack(fill="x",padx=16,pady=10); logf.pack_propagate(False)
+        tk.Label(logf,text="執行記錄",font=("Segoe UI",11,"bold"),bg=BG2,fg=TEXT2).pack(anchor="w",padx=10,pady=6)
         lsb=tk.Scrollbar(logf); lsb.pack(side="right",fill="y")
         self.log_box=tk.Text(logf,yscrollcommand=lsb.set,bg=BG2,fg=TEXT2,font=("Consolas",10),
                              relief="flat",bd=0,state="disabled",wrap="word",highlightthickness=0)
@@ -877,16 +877,16 @@ class PreviewWin(tk.Toplevel):
                  font=("Segoe UI",9),bg=BG2,fg=TEXT2).pack(side="left",padx=8)
 
         if self.table:
-            hf=tk.Frame(self,bg=BG); hf.pack(fill="x",padx=10,pady=(6,2))
+            hf=tk.Frame(self,bg=BG); hf.pack(fill="x",padx=10,pady=6)
             tk.Label(hf,text="欄位名稱（可修改後點「套用」更新預覽）：",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(side="left")
-            ce=tk.Frame(self,bg=BG); ce.pack(fill="x",padx=10,pady=(0,4))
+            ce=tk.Frame(self,bg=BG); ce.pack(fill="x",padx=10,pady=4)
             for ci,hval in enumerate(self.table[0]):
                 v=tk.StringVar(value=clean(hval)); self.col_vars.append(v)
                 f=tk.Frame(ce,bg=CARD,padx=4,pady=2); f.pack(side="left",padx=(0,3))
                 tk.Label(f,text=f"欄{ci+1}",font=("Segoe UI",7),bg=CARD,fg=TEXT2).pack()
                 tk.Entry(f,textvariable=v,width=12,bg=BG2,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",10)).pack(ipady=3)
 
-        tf=tk.Frame(self,bg=BG); tf.pack(fill="both",expand=True,padx=10,pady=(0,4))
+        tf=tk.Frame(self,bg=BG); tf.pack(fill="both",expand=True,padx=10,pady=4)
         preview=self.table[:50]
         ncols2=max((len(r) for r in preview),default=1)
         cols=[f"C{i+1}" for i in range(ncols2)]
@@ -901,9 +901,9 @@ class PreviewWin(tk.Toplevel):
         # Style 已在 App.__init__ 設定，這裡不重複初始化
         self._fill(preview)
         self.tree.bind("<Double-1>",self._on_double_click)
-        tk.Label(tf,text="💡 雙擊儲存格可直接編輯　Enter 換行　Ctrl+Enter / Tab 儲存　Esc 取消",font=("Segoe UI",10),bg=BG,fg=TEXT2).grid(row=2,column=0,sticky="w",pady=(4,0))
+        tk.Label(tf,text="💡 雙擊儲存格可直接編輯　Enter 換行　Ctrl+Enter / Tab 儲存　Esc 取消",font=("Segoe UI",10),bg=BG,fg=TEXT2).grid(row=2,column=0,sticky="w",pady=4)
 
-        bf=tk.Frame(self,bg=BG); bf.pack(fill="x",padx=10,pady=(0,8))
+        bf=tk.Frame(self,bg=BG); bf.pack(fill="x",padx=10,pady=8)
         tk.Button(bf,text="🔄  套用欄位名稱",font=("Segoe UI",11),bg=CARD,fg=TEXT,relief="flat",cursor="hand2",padx=14,pady=6,command=self._apply).pack(side="left",padx=(0,8))
         tk.Button(bf,text="💾  另存為 Excel",font=("Segoe UI",12,"bold"),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=18,pady=7,command=self.save).pack(side="right")
         tk.Button(bf,text="關閉",font=("Segoe UI",11),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=14,pady=6,command=self.destroy).pack(side="right",padx=(0,6))
