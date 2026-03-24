@@ -65,34 +65,60 @@ def parse_auto(pdf_path, settings, log_cb=None):
     skip_dup=settings.get("skip_duplicate_header",True)
     strategy="lines"; all_rows=[]; header=None
 
-    def _is_wm(row):
-        txt=" ".join(row)
-        return any(k in txt for k in wm) if wm else False
-
+    def _flat(row): return " ".join(v.replace("\n"," ") if v else "" for v in row)
+    def _is_wm(row): return any(k in _flat(row) for k in wm) if wm else False
     def _is_hdr(row):
-        txt=" ".join(row)
-        return ("出貨單編號" in txt and "出貨日期" in txt) or                ("出貨日期" in txt and "星期" in txt and "位置" in txt)
+        t=_flat(row)
+        return ("出貨單編號" in t and "出貨日期" in t) or ("出貨日期" in t and "星期" in t and "位置" in t)
 
     with pdfplumber.open(pdf_path) as pdf:
         if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（自動模式）")
         for pn,page in enumerate(pdf.pages,1):
             if log_cb: log_cb(f"  解析第 {pn} 頁...")
-            tables=page.extract_tables(T_LINES)
-            if not tables or not any(len(t)>1 for t in tables):
-                tables=page.extract_tables(T_TEXT); strategy="text"
+            tbl_objs=page.find_tables(T_LINES)
+            if not tbl_objs:
+                tbl_objs=page.find_tables(T_TEXT); strategy="text"
             else: strategy="lines"
-            for t in (tables or []):
-                for row in t:
-                    r=[clean(v) for v in row]
-                    if not any(r): continue
-                    if _is_wm(r): continue
-                    if _is_hdr(r):
-                        if header is None:
-                            header=r; all_rows.append(r)
-                        elif not skip_dup:
-                            all_rows.append(r)
-                        continue
-                    all_rows.append(r)
+
+            if tbl_objs:
+                words=page.extract_words(x_tolerance=3,y_tolerance=3)
+                line_map={}
+                for w in words:
+                    y=round(w["top"]/3)*3
+                    line_map.setdefault(y,[]).append(w)
+                for tbl in tbl_objs:
+                    for tbl_row in tbl.rows:
+                        row_data=[]
+                        for cell in tbl_row.cells:
+                            if cell is None: row_data.append(""); continue
+                            x0,y0,x1,y1=cell
+                            cell_lines={}
+                            for y,ws in line_map.items():
+                                for w in ws:
+                                    if y0<=w["top"]<=y1 and x0<=w["x0"]<=x1:
+                                        cell_lines.setdefault(round(w["top"],1),[]).append(w["text"])
+                            text="\n".join(" ".join(cell_lines[y]) for y in sorted(cell_lines))
+                            row_data.append(text)
+                        if not any(row_data): continue
+                        if _is_wm(row_data): continue
+                        if _is_hdr(row_data):
+                            if header is None:
+                                header=[clean(v) for v in row_data]; all_rows.append(header)
+                            elif not skip_dup: all_rows.append([clean(v) for v in row_data])
+                            continue
+                        all_rows.append(row_data)
+            else:
+                tables=page.extract_tables(T_TEXT)
+                for t in (tables or []):
+                    for row in t:
+                        r=[clean(v) for v in row]
+                        if not any(r): continue
+                        if _is_wm(r): continue
+                        if _is_hdr(r):
+                            if header is None: header=r; all_rows.append(r)
+                            elif not skip_dup: all_rows.append(r)
+                            continue
+                        all_rows.append(r)
     return all_rows, strategy
 
 # ══════════════════════════════════════════
@@ -323,8 +349,8 @@ def write_excel(table, merge_info, out_path, col_map=None):
                 cell.font=Font(size=10)
                 if val: max_lines=max(max_lines, str(val).count("\n")+1)
         if not is_hdr:
-            # 列高：依最多換行數自動調整，每行約15pt，最少22，最多200
-            ws.row_dimensions[er].height=min(max(22, 15*max_lines), 200)
+            # 列高：依各欄換行數計算，每行15pt，最少22，最多300
+            ws.row_dimensions[er].height=min(max(22, 15*max_lines), 300)
             drc+=1
         else:
             ws.row_dimensions[er].height=24
@@ -623,45 +649,58 @@ class PreviewWin(tk.Toplevel):
     def _apply(self): self._fill(self.table[:50])
 
     def _on_double_click(self, event):
-        """雙擊儲存格可編輯內文"""
+        """雙擊儲存格 → inline 編輯（像 Excel）"""
         item=self.tree.focus()
         if not item: return
-        col=self.tree.identify_column(event.x)
-        ci=int(col.replace("#",""))-1
-        # 找出這列在 table 中的索引（+1 因為標題在索引0）
-        items=self.tree.get_children()
-        ri=list(items).index(item)+1
+        col_id=self.tree.identify_column(event.x)
+        ci=int(col_id.replace("#",""))-1
+        items=list(self.tree.get_children())
+        if item not in items: return
+        ri=items.index(item)+1
         if ri>=len(self.table): return
         cur_val=self.table[ri][ci] if ci<len(self.table[ri]) else ""
-        # 彈出編輯視窗
-        self._edit_cell(item,col,ci,ri,cur_val)
+        # 取得該格的螢幕位置
+        bbox=self.tree.bbox(item, col_id)
+        if not bbox: return
+        x,y,w,h=bbox
+        # 在格子上疊一個 Entry（單行）或 Text（多行）
+        has_nl="\n" in cur_val
+        if has_nl:
+            lines=cur_val.count("\n")+1
+            edit_h=min(max(lines,2),8)
+            widget=tk.Text(self.tree,bg="white",fg="black",relief="flat",
+                           font=("Segoe UI",9),wrap="word",height=edit_h,
+                           insertbackground="black")
+            widget.insert("1.0",cur_val)
+            widget.place(x=x,y=y,width=max(w,200),height=edit_h*16)
+            def _get_val(): return widget.get("1.0","end-1c")
+            def _key(e):
+                if e.keysym=="Escape": widget.destroy()
+                elif e.keysym=="Return" and not (e.state&0x4): _commit()
+            widget.bind("<KeyPress>",_key)
+        else:
+            var=tk.StringVar(value=cur_val)
+            widget=tk.Entry(self.tree,textvariable=var,bg="white",fg="black",
+                            relief="flat",font=("Segoe UI",9),
+                            insertbackground="black")
+            widget.place(x=x,y=y,width=max(w,160),height=max(h,22))
+            widget.select_range(0,"end")
+            def _get_val(): return var.get()
+            def _key(e):
+                if e.keysym=="Escape": widget.destroy()
+                elif e.keysym in ("Return","Tab"): _commit()
+            widget.bind("<KeyPress>",_key)
 
-    def _edit_cell(self,item,col,ci,ri,cur_val):
-        win=tk.Toplevel(self); win.title("編輯儲存格")
-        win.geometry("480x280"); win.configure(bg=BG); win.grab_set()
-        col_name=self.table[0][ci] if ci<len(self.table[0]) else f"欄{ci+1}"
-        tk.Label(win,text=f"欄位：{col_name}",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w",padx=12,pady=(10,4))
-        tk.Label(win,text="（Ctrl+Enter 換行）",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",padx=12,pady=(0,4))
-        tf=tk.Frame(win,bg=CARD); tf.pack(fill="both",expand=True,padx=12,pady=(0,8))
-        txt=tk.Text(tf,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",
-                    font=("Segoe UI",10),wrap="word",height=8)
-        txt.pack(fill="both",expand=True,padx=4,pady=4)
-        txt.insert("1.0",cur_val.replace("\n","\n"))
-        txt.focus_set()
-        def _save():
-            new_val=txt.get("1.0","end-1c")
-            # 更新 table 資料
+        widget.focus_set()
+
+        def _commit(e=None):
+            new_val=_get_val()
             while len(self.table[ri])<ci+1: self.table[ri].append("")
             self.table[ri][ci]=new_val
-            win.destroy()
+            widget.destroy()
             self._fill(self.table[:50])
-        def _cancel(): win.destroy()
-        bf=tk.Frame(win,bg=BG); bf.pack(fill="x",padx=12,pady=(0,10))
-        tk.Button(bf,text="確定",font=("Segoe UI",10,"bold"),bg=ACCENT,fg="white",
-                  relief="flat",cursor="hand2",padx=14,pady=5,command=_save).pack(side="right")
-        tk.Button(bf,text="取消",font=("Segoe UI",9),bg=BG2,fg=TEXT2,
-                  relief="flat",cursor="hand2",padx=10,pady=5,command=_cancel).pack(side="right",padx=(0,6))
-        win.bind("<Return>",lambda e:_save())
+
+        widget.bind("<FocusOut>",_commit)
 
     def save(self):
         out=filedialog.asksaveasfilename(title="另存 Excel",defaultextension=".xlsx",
