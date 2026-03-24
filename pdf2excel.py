@@ -26,9 +26,10 @@ except ImportError:
     from openpyxl.utils import get_column_letter
     from openpyxl.cell.cell import MergedCell
 
-BG="#1A1A2E"; BG2="#16213E"; CARD="#0F3460"; ACCENT="#E94560"
-ACCENT2="#533483"; TEXT="#EAEAEA"; TEXT2="#A0A8C0"
-SUCCESS="#4CAF82"; ERROR="#E94560"; WARNING="#F0A500"
+BG="#12121F"; BG2="#1A1A2E"; CARD="#0D2137"; ACCENT="#E94560"
+ACCENT2="#6C3FC4"; TEXT="#F0F0F0"; TEXT2="#8FA8C8"
+SUCCESS="#3EC97A"; ERROR="#E94560"; WARNING="#F5A623"
+ACCENT_HOVER="#FF6B81"; CARD2="#162840"
 
 DEFAULT_SETTINGS = {
     "mode": "auto",
@@ -390,7 +391,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("PDF 轉 Excel 通用工具 v4")
-        self.geometry("1020x740"); self.minsize(900,620)
+        self.geometry("1100x780"); self.minsize(960,660)
         self.configure(bg=BG)
         self.pdf_files=[]; self.running=False
         self.settings=dict(DEFAULT_SETTINGS)
@@ -398,36 +399,36 @@ class App(tk.Tk):
         self._build()
 
     def _build(self):
-        hdr=tk.Frame(self,bg=CARD,height=54); hdr.pack(fill="x"); hdr.pack_propagate(False)
-        tk.Label(hdr,text="PDF  →  Excel",font=("Segoe UI",17,"bold"),bg=CARD,fg="white").pack(side="left",padx=20,pady=8)
-        tk.Label(hdr,text="通用版 v4・雙模式・進階設定・合併儲存格",font=("Segoe UI",10),bg=CARD,fg=TEXT2).pack(side="left")
+        hdr=tk.Frame(self,bg=CARD,height=68); hdr.pack(fill="x"); hdr.pack_propagate(False)
+        tk.Label(hdr,text="PDF  →  Excel",font=("Segoe UI",22,"bold"),bg=CARD,fg="white").pack(side="left",padx=24,pady=12)
+        tk.Label(hdr,text="通用版 v4・雙模式・進階設定・合併儲存格・換行保留",font=("Segoe UI",11),bg=CARD,fg=TEXT2).pack(side="left")
 
         main=tk.Frame(self,bg=BG); main.pack(fill="both",expand=True,padx=16,pady=10)
 
         # 左：檔案清單
         left=tk.Frame(main,bg=BG); left.pack(side="left",fill="both",expand=True)
         r1=tk.Frame(left,bg=BG); r1.pack(fill="x",pady=(0,4))
-        tk.Label(r1,text="PDF 檔案清單",font=("Segoe UI",10,"bold"),bg=BG,fg=TEXT).pack(side="left")
-        tk.Button(r1,text="＋ 新增",font=("Segoe UI",9),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=10,pady=2,command=self.add_files).pack(side="right",padx=(3,0))
-        tk.Button(r1,text="清除全部",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=10,pady=2,command=self.clear_files).pack(side="right")
+        tk.Label(r1,text="PDF 檔案清單",font=("Segoe UI",12,"bold"),bg=BG,fg=TEXT).pack(side="left")
+        tk.Button(r1,text="＋ 新增",font=("Segoe UI",11),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=14,pady=4,command=self.add_files).pack(side="right",padx=(4,0))
+        tk.Button(r1,text="清除全部",font=("Segoe UI",11),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=14,pady=4,command=self.clear_files).pack(side="right")
         lf=tk.Frame(left,bg=CARD); lf.pack(fill="both",expand=True)
         sb=tk.Scrollbar(lf); sb.pack(side="right",fill="y")
-        self.listbox=tk.Listbox(lf,yscrollcommand=sb.set,bg=CARD,fg=TEXT,selectbackground=ACCENT2,font=("Segoe UI",9),relief="flat",bd=0,highlightthickness=0,activestyle="none")
+        self.listbox=tk.Listbox(lf,yscrollcommand=sb.set,bg=CARD,fg=TEXT,selectbackground=ACCENT2,font=("Segoe UI",11),relief="flat",bd=0,highlightthickness=0,activestyle="none")
         self.listbox.pack(fill="both",expand=True,padx=2,pady=2)
         sb.config(command=self.listbox.yview); self.listbox.bind("<Delete>",self.remove_sel)
         tk.Label(left,text="選中後按 Delete 可移除",font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",pady=(3,0))
 
         # 右：設定面板
-        right=tk.Frame(main,bg=BG,width=300); right.pack(side="right",fill="y",padx=(14,0)); right.pack_propagate(False)
+        right=tk.Frame(main,bg=BG,width=320); right.pack(side="right",fill="y",padx=(16,0)); right.pack_propagate(False)
 
         # 輸出資料夾
-        tk.Label(right,text="輸出資料夾",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
+        tk.Label(right,text="輸出資料夾",font=("Segoe UI",11,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
         dr=tk.Frame(right,bg=BG); dr.pack(fill="x",pady=(3,8))
-        tk.Entry(dr,textvariable=self.out_dir,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(side="left",fill="x",expand=True,ipady=4,padx=(0,3))
-        tk.Button(dr,text="瀏覽",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=7,pady=2,command=self.browse_dir).pack(side="right")
+        tk.Entry(dr,textvariable=self.out_dir,bg=CARD,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",10)).pack(side="left",fill="x",expand=True,ipady=5,padx=(0,4))
+        tk.Button(dr,text="瀏覽",font=("Segoe UI",10),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=10,pady=3,command=self.browse_dir).pack(side="right")
 
         # 進階設定
-        adv=tk.LabelFrame(right,text=" ⚙  進階設定 ",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT2,bd=1,relief="groove")
+        adv=tk.LabelFrame(right,text=" ⚙  進階設定 ",font=("Segoe UI",11,"bold"),bg=BG,fg=TEXT2,bd=1,relief="groove")
         adv.pack(fill="x",pady=(0,8))
 
         # 解析模式
@@ -437,11 +438,11 @@ class App(tk.Tk):
         for val,lbl,tip in [("auto","自動","先試框線，失敗改座標"),
                             ("table","表格偵測","有框線的PDF"),
                             ("coords","文字座標","無框線/特殊版面")]:
-            col=tk.Frame(mf,bg=BG); col.pack(side="left",padx=(0,6))
+            col=tk.Frame(mf,bg=BG); col.pack(side="left",padx=(0,8))
             tk.Radiobutton(col,text=lbl,variable=self.mode_var,value=val,
                            bg=BG,fg=TEXT,selectcolor=BG2,activebackground=BG,
-                           font=("Segoe UI",9),command=self._on_mode).pack()
-            tk.Label(col,text=tip,font=("Segoe UI",7),bg=BG,fg=TEXT2).pack()
+                           font=("Segoe UI",11),command=self._on_mode).pack()
+            tk.Label(col,text=tip,font=("Segoe UI",8),bg=BG,fg=TEXT2).pack()
 
         def _row(parent, label, var, tip="", wide=False):
             tk.Label(parent,text=label,font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(4,1))
@@ -476,23 +477,23 @@ class App(tk.Tk):
         tk.Label(right,text="轉換進度",font=("Segoe UI",9,"bold"),bg=BG,fg=TEXT).pack(anchor="w")
         s=ttk.Style(); s.theme_use("clam")
         s.configure("P.Horizontal.TProgressbar",troughcolor=CARD,background=ACCENT,
-                    darkcolor=ACCENT,lightcolor=ACCENT,bordercolor=BG,thickness=12)
+                    darkcolor=ACCENT,lightcolor=ACCENT,bordercolor=BG,thickness=14)
         self.pbar=ttk.Progressbar(right,style="P.Horizontal.TProgressbar",orient="horizontal",mode="determinate")
         self.pbar.pack(fill="x",pady=(3,2))
         self.pbar_lbl=tk.Label(right,text="",font=("Segoe UI",8),bg=BG,fg=TEXT2)
         self.pbar_lbl.pack(anchor="w",pady=(0,8))
 
         bc=dict(relief="flat",cursor="hand2")
-        tk.Button(right,text="🔍  預覽 / 調整欄位",font=("Segoe UI",10),bg=CARD,fg=TEXT,pady=7,command=self.open_preview,**bc).pack(fill="x",pady=(0,4))
-        self.btn_start=tk.Button(right,text="▶  開始批次轉換",font=("Segoe UI",12,"bold"),bg=ACCENT,fg="white",pady=9,command=self.start_convert,**bc)
-        self.btn_start.pack(fill="x",pady=(0,4))
-        tk.Button(right,text="📂  開啟輸出資料夾",font=("Segoe UI",9),bg=BG2,fg=TEXT2,pady=5,command=self.open_out,**bc).pack(fill="x")
+        tk.Button(right,text="🔍  預覽 / 調整欄位",font=("Segoe UI",12),bg=CARD,fg=TEXT,pady=9,command=self.open_preview,**bc).pack(fill="x",pady=(0,5))
+        self.btn_start=tk.Button(right,text="▶  開始批次轉換",font=("Segoe UI",14,"bold"),bg=ACCENT,fg="white",pady=11,command=self.start_convert,**bc)
+        self.btn_start.pack(fill="x",pady=(0,5))
+        tk.Button(right,text="📂  開啟輸出資料夾",font=("Segoe UI",11),bg=BG2,fg=TEXT2,pady=7,command=self.open_out,**bc).pack(fill="x")
 
         # Log
         logf=tk.Frame(self,bg=BG2,height=148); logf.pack(fill="x",padx=16,pady=(0,10)); logf.pack_propagate(False)
-        tk.Label(logf,text="執行記錄",font=("Segoe UI",9,"bold"),bg=BG2,fg=TEXT2).pack(anchor="w",padx=10,pady=(4,0))
+        tk.Label(logf,text="執行記錄",font=("Segoe UI",11,"bold"),bg=BG2,fg=TEXT2).pack(anchor="w",padx=10,pady=(6,0))
         lsb=tk.Scrollbar(logf); lsb.pack(side="right",fill="y")
-        self.log_box=tk.Text(logf,yscrollcommand=lsb.set,bg=BG2,fg=TEXT2,font=("Consolas",8),
+        self.log_box=tk.Text(logf,yscrollcommand=lsb.set,bg=BG2,fg=TEXT2,font=("Consolas",10),
                              relief="flat",bd=0,state="disabled",wrap="word",highlightthickness=0)
         self.log_box.pack(fill="both",expand=True,padx=10,pady=(0,6))
         lsb.config(command=self.log_box.yview)
@@ -593,7 +594,7 @@ class PreviewWin(tk.Toplevel):
         self.pdf_path=pdf_path; self.table=table
         self.strategy=strategy; self.settings=settings; self.col_vars=[]
         self.title(f"預覽 — {os.path.basename(pdf_path)}")
-        self.geometry("1200x680"); self.configure(bg=BG); self._build()
+        self.geometry("1300x740"); self.configure(bg=BG); self._build()
 
     def _build(self):
         info=tk.Frame(self,bg=BG2,height=32); info.pack(fill="x"); info.pack_propagate(False)
@@ -609,7 +610,7 @@ class PreviewWin(tk.Toplevel):
                 v=tk.StringVar(value=clean(hval)); self.col_vars.append(v)
                 f=tk.Frame(ce,bg=CARD,padx=4,pady=2); f.pack(side="left",padx=(0,3))
                 tk.Label(f,text=f"欄{ci+1}",font=("Segoe UI",7),bg=CARD,fg=TEXT2).pack()
-                tk.Entry(f,textvariable=v,width=10,bg=BG2,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",8)).pack(ipady=2)
+                tk.Entry(f,textvariable=v,width=12,bg=BG2,fg=TEXT,insertbackground="white",relief="flat",font=("Segoe UI",10)).pack(ipady=3)
 
         tf=tk.Frame(self,bg=BG); tf.pack(fill="both",expand=True,padx=10,pady=(0,4))
         preview=self.table[:50]
@@ -624,16 +625,16 @@ class PreviewWin(tk.Toplevel):
         self.tree.grid(row=0,column=0,sticky="nsew"); vsb.grid(row=0,column=1,sticky="ns"); hsb.grid(row=1,column=0,sticky="ew")
         tf.rowconfigure(0,weight=1); tf.columnconfigure(0,weight=1)
         s=ttk.Style()
-        s.configure("Treeview",background=CARD,foreground=TEXT,fieldbackground=CARD,font=("Segoe UI",9),rowheight=20)
-        s.configure("Treeview.Heading",background=BG2,foreground=TEXT,font=("Segoe UI",9,"bold"))
+        s.configure("Treeview",background=CARD,foreground=TEXT,fieldbackground=CARD,font=("Segoe UI",11),rowheight=26)
+        s.configure("Treeview.Heading",background=BG2,foreground=TEXT,font=("Segoe UI",11,"bold"))
         self._fill(preview)
         self.tree.bind("<Double-1>",self._on_double_click)
-        tk.Label(tf,text="💡 雙擊儲存格可編輯內文",font=("Segoe UI",8),bg=BG,fg=TEXT2).grid(row=2,column=0,sticky="w",pady=(2,0))
+        tk.Label(tf,text="💡 雙擊儲存格可直接編輯　Enter 換行　Ctrl+Enter / Tab 儲存　Esc 取消",font=("Segoe UI",10),bg=BG,fg=TEXT2).grid(row=2,column=0,sticky="w",pady=(4,0))
 
         bf=tk.Frame(self,bg=BG); bf.pack(fill="x",padx=10,pady=(0,8))
-        tk.Button(bf,text="🔄  套用欄位名稱",font=("Segoe UI",9),bg=CARD,fg=TEXT,relief="flat",cursor="hand2",padx=10,pady=4,command=self._apply).pack(side="left",padx=(0,6))
-        tk.Button(bf,text="💾  另存為 Excel",font=("Segoe UI",10,"bold"),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=14,pady=5,command=self.save).pack(side="right")
-        tk.Button(bf,text="關閉",font=("Segoe UI",9),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=10,pady=5,command=self.destroy).pack(side="right",padx=(0,5))
+        tk.Button(bf,text="🔄  套用欄位名稱",font=("Segoe UI",11),bg=CARD,fg=TEXT,relief="flat",cursor="hand2",padx=14,pady=6,command=self._apply).pack(side="left",padx=(0,8))
+        tk.Button(bf,text="💾  另存為 Excel",font=("Segoe UI",12,"bold"),bg=ACCENT,fg="white",relief="flat",cursor="hand2",padx=18,pady=7,command=self.save).pack(side="right")
+        tk.Button(bf,text="關閉",font=("Segoe UI",11),bg=BG2,fg=TEXT2,relief="flat",cursor="hand2",padx=14,pady=6,command=self.destroy).pack(side="right",padx=(0,6))
 
     def _fill(self,data):
         self.tree.delete(*self.tree.get_children())
@@ -649,7 +650,9 @@ class PreviewWin(tk.Toplevel):
     def _apply(self): self._fill(self.table[:50])
 
     def _on_double_click(self, event):
-        """雙擊儲存格 → inline 編輯（像 Excel）"""
+        """雙擊儲存格 → inline Text 編輯
+        Enter = 換行   Ctrl+Enter / Tab = 儲存   Esc = 取消
+        """
         item=self.tree.focus()
         if not item: return
         col_id=self.tree.identify_column(event.x)
@@ -659,48 +662,45 @@ class PreviewWin(tk.Toplevel):
         ri=items.index(item)+1
         if ri>=len(self.table): return
         cur_val=self.table[ri][ci] if ci<len(self.table[ri]) else ""
-        # 取得該格的螢幕位置
         bbox=self.tree.bbox(item, col_id)
         if not bbox: return
         x,y,w,h=bbox
-        # 在格子上疊一個 Entry（單行）或 Text（多行）
-        has_nl="\n" in cur_val
-        if has_nl:
-            lines=cur_val.count("\n")+1
-            edit_h=min(max(lines,2),8)
-            widget=tk.Text(self.tree,bg="white",fg="black",relief="flat",
-                           font=("Segoe UI",9),wrap="word",height=edit_h,
-                           insertbackground="black")
-            widget.insert("1.0",cur_val)
-            widget.place(x=x,y=y,width=max(w,200),height=edit_h*16)
-            def _get_val(): return widget.get("1.0","end-1c")
-            def _key(e):
-                if e.keysym=="Escape": widget.destroy()
-                elif e.keysym=="Return" and not (e.state&0x4): _commit()
-            widget.bind("<KeyPress>",_key)
-        else:
-            var=tk.StringVar(value=cur_val)
-            widget=tk.Entry(self.tree,textvariable=var,bg="white",fg="black",
-                            relief="flat",font=("Segoe UI",9),
-                            insertbackground="black")
-            widget.place(x=x,y=y,width=max(w,160),height=max(h,22))
-            widget.select_range(0,"end")
-            def _get_val(): return var.get()
-            def _key(e):
-                if e.keysym=="Escape": widget.destroy()
-                elif e.keysym in ("Return","Tab"): _commit()
-            widget.bind("<KeyPress>",_key)
-
+        # 統一用 Text 框，高度依內容自動設定（最少2行，最多8行）
+        n_lines=max(cur_val.count("\n")+1, 2)
+        edit_h=min(n_lines, 8)
+        widget=tk.Text(self.tree, bg="#FFFDE7", fg="black",
+                       relief="solid", bd=1,
+                       font=("Segoe UI",10), wrap="word",
+                       height=edit_h, insertbackground="black",
+                       selectbackground=ACCENT2)
+        widget.insert("1.0", cur_val)
+        widget.place(x=x, y=y, width=max(w,220), height=edit_h*18+4)
         widget.focus_set()
+        widget.mark_set("insert","end")
+
+        orig_val=cur_val  # 用於 Esc 取消
 
         def _commit(e=None):
-            new_val=_get_val()
+            new_val=widget.get("1.0","end-1c")
             while len(self.table[ri])<ci+1: self.table[ri].append("")
             self.table[ri][ci]=new_val
             widget.destroy()
             self._fill(self.table[:50])
 
-        widget.bind("<FocusOut>",_commit)
+        def _cancel(e=None):
+            widget.destroy()
+
+        def _key(e):
+            # Ctrl+Enter 或 Tab → 儲存
+            if e.keysym in ("Tab",) or (e.keysym=="Return" and (e.state&0x4)):
+                _commit(); return "break"
+            # Esc → 取消
+            if e.keysym=="Escape":
+                _cancel(); return "break"
+            # 其他鍵正常處理（Enter 換行）
+
+        widget.bind("<KeyPress>", _key)
+        widget.bind("<FocusOut>", _commit)
 
     def save(self):
         out=filedialog.asksaveasfilename(title="另存 Excel",defaultextension=".xlsx",
