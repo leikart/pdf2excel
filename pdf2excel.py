@@ -112,6 +112,14 @@ def _extract_page_mixed(page, wm_keys, skip_dup, header, all_rows):
                 if any(row_data) and row_y is not None:
                     page_rows.append((row_y, row_data))
 
+        # ── 收集所有 cell bbox（比 tbl_bbox 更精準）──
+        all_cells_bbox=[]
+        for tbl in tbl_objs:
+            for tbl_row2 in tbl.rows:
+                for cell in tbl_row2.cells:
+                    if cell is not None:
+                        all_cells_bbox.append(cell)
+
         # ── 表格外的文字（說明文字，放入第一欄）──
         for y_key in sorted(line_map.keys()):
             ws_line = sorted(line_map[y_key], key=lambda w: w["x0"])
@@ -119,8 +127,10 @@ def _extract_page_mixed(page, wm_keys, skip_dup, header, all_rows):
             actual_y = ws_line[0]["top"]
             line_text = " ".join(w["text"] for w in ws_line)
             if not line_text.strip(): continue
-            in_tbl = any(ty0 <= actual_y <= ty1 for (_,ty0,_,ty1) in tbl_bboxes)
-            if not in_tbl:
+            # 用 cell bbox 精準判斷（非 tbl_bbox），才能抓到大格子旁的說明文字
+            in_cell = any(cx0<=ws_line[0]["x0"]<=cx1 and cy0<=actual_y<=cy1
+                          for (cx0,cy0,cx1,cy1) in all_cells_bbox)
+            if not in_cell:
                 page_rows.append((actual_y, [line_text]))
     else:
         # 純文字模式（無框線）
@@ -575,54 +585,92 @@ def compare_tables(table_a, table_b, compare_cols):
     return results, header
 
 def write_diff_excel(results, header, compare_cols, out_path):
+    """
+    差異報告格式：以「舊版（檔案A）」為基底
+    欄位：差異類型 | 選擇欄位的舊版值 | 各欄差異說明
+    - 修改：顯示舊版值 + 各欄「舊→新」
+    - 刪除：顯示舊版值 + 說明「新版已刪除」
+    - 新增：對應舊版位置插入一列，說明「新版新增」
+    - 相同：不顯示
+    """
     wb=Workbook(); ws=wb.active; ws.title="差異報告"
     hfill=PatternFill(start_color="0F3460",end_color="0F3460",fill_type="solid")
     hfont=Font(color="FFFFFF",bold=True,size=11)
-    fills={"add":PatternFill(start_color="C6EFCE",end_color="C6EFCE",fill_type="solid"),
-           "delete":PatternFill(start_color="FFC7CE",end_color="FFC7CE",fill_type="solid"),
-           "modify":PatternFill(start_color="FFEB9C",end_color="FFEB9C",fill_type="solid")}
+    fills={
+        "add":    PatternFill(start_color="C6EFCE",end_color="C6EFCE",fill_type="solid"),
+        "delete": PatternFill(start_color="FFC7CE",end_color="FFC7CE",fill_type="solid"),
+        "modify": PatternFill(start_color="FFEB9C",end_color="FFEB9C",fill_type="solid"),
+    }
     thin=Side(style="thin")
     bdr=Border(left=thin,right=thin,top=thin,bottom=thin)
     ctr=Alignment(horizontal="center",vertical="top",wrap_text=True)
     lwrap=Alignment(horizontal="left",vertical="top",wrap_text=True)
-    col_names_a=[f"{header[ci] if ci<len(header) else f'欄{ci+1}'}\n（檔案A）" for ci in compare_cols]
-    col_names_b=[f"{header[ci] if ci<len(header) else f'欄{ci+1}'}\n（檔案B）" for ci in compare_cols]
-    hdr_row=["差異類型","列號"]+col_names_a+col_names_b+["差異說明"]
+
+    # 標題列：差異類型 + 選擇欄位（舊版值）+ 各欄差異說明
+    col_labels=[header[ci] if ci<len(header) else f"欄{ci+1}" for ci in compare_cols]
+    hdr_row=["差異類型"] + col_labels + [f"{lbl}\n差異說明" for lbl in col_labels]
     for ci,h in enumerate(hdr_row,1):
         c=ws.cell(row=1,column=ci,value=h)
         c.fill=hfill; c.font=hfont; c.border=bdr; c.alignment=ctr
-    ws.row_dimensions[1].height=30
+    ws.row_dimensions[1].height=36
+
     ri=2
     type_map={"add":"新增","delete":"刪除","modify":"修改"}
+
     for res in results:
         t=res["type"]
         if t=="match": continue
-        row_a=res["row_a"] or []; row_b=res["row_b"] or []
-        idx=res["idx"]+2
-        if t=="add": desc=f"第{idx}列：檔案B新增此列"
-        elif t=="delete": desc=f"第{idx}列：此列在檔案B中已刪除"
-        else:
-            parts=[f"【{cn}】A=「{va}」→ B=「{vb}」" for _,cn,va,vb in res["diffs"]]
-            desc=f"第{idx}列修改：\n"+"\n".join(parts)
+        row_a=res["row_a"] or []
+        row_b=res["row_b"] or []
+
+        # 舊版欄位值（基底）
         vals_a=[clean(row_a[ci]) if ci<len(row_a) else "" for ci in compare_cols]
-        vals_b=[clean(row_b[ci]) if ci<len(row_b) else "" for ci in compare_cols]
-        row_data=[type_map[t],idx]+vals_a+vals_b+[desc]
-        nl=desc.count("\n")+1
-        ws.row_dimensions[ri].height=max(18,15*nl)
+
+        # 各欄差異說明
+        if t=="add":
+            # 新版新增：舊版欄位為空，說明欄顯示新版的值
+            vals_a=["" for _ in compare_cols]
+            diff_descs=[]
+            for ci in compare_cols:
+                vb=clean(row_b[ci]) if ci<len(row_b) else ""
+                diff_descs.append(f"新增：「{vb}」" if vb else "新增（空白）")
+        elif t=="delete":
+            # 舊版刪除：保留舊版值，說明欄顯示已刪除
+            diff_descs=["已刪除" for _ in compare_cols]
+        else:
+            # 修改：說明欄顯示「舊→新」，沒有差異的欄位留空
+            diff_map={ci:(va,vb) for ci,_,va,vb in res["diffs"]}
+            diff_descs=[]
+            for ci in compare_cols:
+                if ci in diff_map:
+                    va,vb=diff_map[ci]
+                    diff_descs.append(f"「{va}」→「{vb}」")
+                else:
+                    diff_descs.append("")
+
+        row_data=[type_map[t]] + vals_a + diff_descs
+        # 列高依差異說明最長的來決定
+        max_nl=max((str(v).count("\n")+1 for v in diff_descs if v),default=1)
+        ws.row_dimensions[ri].height=max(20,16*max_nl)
+
+        fill=fills.get(t,fills["modify"])
         for ci,val in enumerate(row_data,1):
             c=ws.cell(row=ri,column=ci,value=val)
-            c.fill=fills.get(t,fills["modify"]); c.border=bdr
-            c.alignment=ctr if ci<=2 else lwrap; c.font=Font(size=10)
+            c.fill=fill; c.border=bdr; c.font=Font(size=10)
+            c.alignment=ctr if ci==1 else lwrap
         ri+=1
+
     if ri==2:
         c=ws.cell(row=2,column=1,value="✅ 兩份檔案在選擇的欄位中完全相同")
         c.font=Font(size=12,bold=True,color="375623")
+
+    # 欄寬
     ws.column_dimensions["A"].width=10
-    ws.column_dimensions["B"].width=8
     ncol=len(compare_cols)
-    for i in range(ncol*2):
-        ws.column_dimensions[get_column_letter(3+i)].width=24
-    ws.column_dimensions[get_column_letter(3+ncol*2)].width=55
+    for i in range(ncol):
+        ws.column_dimensions[get_column_letter(2+i)].width=20
+    for i in range(ncol):
+        ws.column_dimensions[get_column_letter(2+ncol+i)].width=28
     ws.freeze_panes="A2"
     wb.save(out_path)
 
@@ -1098,13 +1146,15 @@ class App(tk.Tk):
             idx=res["idx"]+2
             row_a=res["row_a"] or []; row_b=res["row_b"] or []
             if t=="add":
-                desc=f"檔案B第{idx}列新增："+", ".join(
-                    f"{header[c] if c<len(header) else f'欄{c+1}'}=「{clean(row_b[c]) if c<len(row_b) else ''}」"
-                    for c in cols)
+                vals=[]
+                for c in cols:
+                    vb=clean(row_b[c]) if c<len(row_b) else ""
+                    if vb:
+                        cn=header[c] if c<len(header) else f"欄{c+1}"
+                        vals.append(f"{cn}=「{vb}」")
+                desc="新版新增此列："+", ".join(vals) if vals else "新版新增（空列）"
             elif t=="delete":
-                desc=f"第{idx}列已從檔案B刪除："+", ".join(
-                    f"{header[c] if c<len(header) else f'欄{c+1}'}=「{clean(row_a[c]) if c<len(row_a) else ''}」"
-                    for c in cols)
+                desc="新版已刪除此列"
             else:
                 parts=[f"【{cn}】「{va}」→「{vb}」" for _,cn,va,vb in res["diffs"]]
                 desc="  |  ".join(parts)
