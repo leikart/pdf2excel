@@ -54,7 +54,7 @@ def normalize(table):
     return [[clean(v) for v in row] for row in table if any(clean(v) for v in row)]
 
 # ══════════════════════════════════════════
-#  模式一：自動表格偵測
+#  模式一：自動表格偵測（通用混合模式 v2）
 # ══════════════════════════════════════════
 T_LINES={"vertical_strategy":"lines","horizontal_strategy":"lines",
          "snap_tolerance":3,"join_tolerance":3,"edge_min_length":3,
@@ -62,82 +62,78 @@ T_LINES={"vertical_strategy":"lines","horizontal_strategy":"lines",
          "intersection_tolerance":3,"text_tolerance":3}
 T_TEXT={**T_LINES,"vertical_strategy":"text","horizontal_strategy":"text"}
 
-def _extract_page_mixed(page, wm_keys, skip_dup, header, all_rows):
+def _extract_page_v2(page):
     """
-    混合模式頁面解析：
-    - 有框線的部分：用 cell bbox 擷取（保留換行）
-    - 框線外的文字（說明文字/標題）：依 y 座標插入第一欄
-    回傳 (updated_header, strategy)
+    通用頁面解析（不針對任何特定格式）
+    核心原則：
+    1. 表格內外判斷：用「各列的 y 範圍」判斷，不依賴 cell 是否存在
+       → 解決格線不完整（cell=None）導致資料被誤判為表格外的問題
+    2. 表格外文字：只收集 y 在所有表格列範圍外的文字行
+    3. 換行保留：cell 內用 y 座標分行，用 \n 串接
+    回傳 (rows, strategy)
     """
     all_words = page.extract_words(x_tolerance=3, y_tolerance=3)
     line_map = {}
     for w in all_words:
-        y = round(w["top"]/3)*3
+        y = round(w["top"] / 3) * 3
         line_map.setdefault(y, []).append(w)
 
-    T_LINES_LOCAL={"vertical_strategy":"lines","horizontal_strategy":"lines",
-                   "snap_tolerance":3,"join_tolerance":3,"edge_min_length":3,
-                   "min_words_vertical":1,"min_words_horizontal":1,
-                   "intersection_tolerance":3,"text_tolerance":3}
-
-    tbl_objs = page.find_tables(T_LINES_LOCAL)
+    tbl_objs = page.find_tables(T_LINES)
     strategy = "lines+text" if tbl_objs else "text"
-
-    def _flat(row): return " ".join(v.replace("\n"," ") if v else "" for v in row)
-    def _is_wm(row): return any(k in _flat(row) for k in wm_keys) if wm_keys else False
-    def _is_hdr(row):
-        t = _flat(row)
-        return ("出貨單編號" in t and "出貨日期" in t) or ("出貨日期" in t and "星期" in t and "位置" in t)
-
-    page_rows = []  # (y, row_data)
+    page_rows = []  # (y_pos, row_data)
 
     if tbl_objs:
-        tbl_bboxes = [t.bbox for t in tbl_objs]
-
-        # ── 表格內容（cell level，保留換行）──
+        # 建立所有表格列的 y 範圍（只用 y，不管 x）
+        # 原因：有些 PDF 的格線在某些欄是 None，但文字仍在同一列的 y 範圍內
+        tbl_row_ybands = []
         for tbl in tbl_objs:
             for tbl_row in tbl.rows:
-                row_data = []; row_y = None
+                cells = [c for c in tbl_row.cells if c is not None]
+                if cells:
+                    ry0 = min(c[1] for c in cells)
+                    ry1 = max(c[3] for c in cells)
+                    tbl_row_ybands.append((ry0, ry1))
+
+        # ── 擷取表格內容（cell level，保留換行）──
+        for tbl in tbl_objs:
+            for tbl_row in tbl.rows:
+                row_data = []
+                row_y = None
                 for cell in tbl_row.cells:
-                    if cell is None: row_data.append(""); continue
-                    x0,y0,x1,y1 = cell
-                    if row_y is None: row_y = (y0+y1)/2
+                    if cell is None:
+                        row_data.append("")
+                        continue
+                    x0, y0, x1, y1 = cell
+                    if row_y is None:
+                        row_y = (y0 + y1) / 2
                     cell_lines = {}
-                    for y, ws in line_map.items():
+                    for y_key, ws in line_map.items():
                         for w in ws:
-                            if y0<=w["top"]<=y1 and x0<=w["x0"]<=x1:
-                                cell_lines.setdefault(round(w["top"],1),[]).append(w["text"])
+                            if y0 <= w["top"] <= y1 and x0 <= w["x0"] <= x1:
+                                cell_lines.setdefault(round(w["top"], 1), []).append(w["text"])
                     text = "\n".join(" ".join(cell_lines[y]) for y in sorted(cell_lines))
                     row_data.append(text)
                 if any(row_data) and row_y is not None:
                     page_rows.append((row_y, row_data))
 
-        # ── 收集所有 cell bbox（比 tbl_bbox 更精準）──
-        all_cells_bbox=[]
-        for tbl in tbl_objs:
-            for tbl_row2 in tbl.rows:
-                for cell in tbl_row2.cells:
-                    if cell is not None:
-                        all_cells_bbox.append(cell)
-
-        # ── 表格外的文字（說明文字，放入第一欄）──
+        # ── 表格外文字：y 不在任何表格列的 y 範圍內 ──
+        # 純粹用 y 判斷，不管 x，最通用
         for y_key in sorted(line_map.keys()):
             ws_line = sorted(line_map[y_key], key=lambda w: w["x0"])
-            if not ws_line: continue
+            if not ws_line:
+                continue
             actual_y = ws_line[0]["top"]
             line_text = " ".join(w["text"] for w in ws_line)
-            if not line_text.strip(): continue
-            # 用 cell bbox 精準判斷（非 tbl_bbox），才能抓到大格子旁的說明文字
-            in_cell = any(cx0<=ws_line[0]["x0"]<=cx1 and cy0<=actual_y<=cy1
-                          for (cx0,cy0,cx1,cy1) in all_cells_bbox)
-            if not in_cell:
+            if not line_text.strip():
+                continue
+            in_tbl_row = any(ry0 <= actual_y <= ry1 for (ry0, ry1) in tbl_row_ybands)
+            if not in_tbl_row:
                 page_rows.append((actual_y, [line_text]))
     else:
-        # 純文字模式（無框線）
-        T_TEXT_LOCAL={**T_LINES_LOCAL,"vertical_strategy":"text","horizontal_strategy":"text"}
-        tables = page.extract_tables(T_TEXT_LOCAL)
+        # 無框線：先試 text 策略，再退回逐行
+        tables = page.extract_tables(T_TEXT)
+        strategy = "text"
         if tables:
-            strategy = "text"
             for t in tables:
                 for row in t:
                     r = [clean(v) for v in row]
@@ -146,40 +142,89 @@ def _extract_page_mixed(page, wm_keys, skip_dup, header, all_rows):
         else:
             for y_key in sorted(line_map.keys()):
                 ws_line = sorted(line_map[y_key], key=lambda w: w["x0"])
-                if not ws_line: continue
+                if not ws_line:
+                    continue
                 actual_y = ws_line[0]["top"]
                 line_text = " ".join(w["text"] for w in ws_line)
                 if line_text.strip():
                     page_rows.append((actual_y, [line_text]))
 
-    # 依 y 排序
     page_rows.sort(key=lambda x: x[0])
+    return [r for _, r in page_rows], strategy
 
-    # 過濾浮水印、處理標題列、加入結果
-    for _, row_data in page_rows:
-        if _is_wm(row_data): continue
-        if _is_hdr(row_data):
-            if header is None:
-                header = [clean(v) for v in row_data]
-                all_rows.append(header)
-            elif not skip_dup:
-                all_rows.append([clean(v) for v in row_data])
-            continue
-        all_rows.append(row_data)
 
-    return header, strategy
+def _find_header_and_merge(rows):
+    """
+    通用標題偵測 + 雙層標題合併（不針對任何特定欄位名稱）
+    規則：
+    1. 找第一個「非空欄位 >= 3」的列 → 主標題
+    2. 下一列若「非空非數字欄位 >= 2 且主標題有空欄 >= 2」→ 子標題，合併
+    3. 標題前的列（說明文字）原樣保留
+    """
+    if not rows:
+        return rows
+    hdr_idx = 0
+    for i, row in enumerate(rows):
+        if sum(1 for v in row if clean(v)) >= 3:
+            hdr_idx = i
+            break
+    r0 = [clean(v) for v in rows[hdr_idx]]
+    is_double = False
+    if hdr_idx + 1 < len(rows):
+        r1 = [clean(v) for v in rows[hdr_idx + 1]]
+        r1_text = sum(1 for v in r1 if v and not v.replace(".", "").replace("-", "").isdigit())
+        r0_empty = sum(1 for v in r0 if not v)
+        if r1_text >= 2 and r0_empty >= 2:
+            is_double = True
+            merged = []
+            for ci in range(max(len(r0), len(r1))):
+                v0 = r0[ci] if ci < len(r0) else ""
+                v1 = r1[ci] if ci < len(r1) else ""
+                if v0 and v1 and v0 != v1:
+                    merged.append(v1)   # 子標題填入主標題的空欄
+                elif v0:
+                    merged.append(v0)
+                elif v1:
+                    merged.append(v1)
+                else:
+                    merged.append(f"欄{ci+1}")
+            r0 = merged
+    skip_to = hdr_idx + 2 if is_double else hdr_idx + 1
+    return rows[:hdr_idx] + [r0] + rows[skip_to:]
+
 
 def parse_auto(pdf_path, settings, log_cb=None):
-    wm=[k.strip() for k in settings["watermark_keywords"].split(",") if k.strip()]
-    skip_dup=settings.get("skip_duplicate_header",True)
-    all_rows=[]; header=None; strategy="lines"
+    wm = [k.strip() for k in settings["watermark_keywords"].split(",") if k.strip()]
+    skip_dup = settings.get("skip_duplicate_header", True)
+    all_rows = []; strategy = "lines"
+
+    def _flat(row): return " ".join(v.replace("\n"," ") if v else "" for v in row)
+    def _is_wm(row): return any(k in _flat(row) for k in wm) if wm else False
+    # 重複標題判斷：非空欄位 >=3 且與第一列完全相同
+    first_hdr = None
 
     with pdfplumber.open(pdf_path) as pdf:
-        if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁（混合模式）")
-        for pn,page in enumerate(pdf.pages,1):
+        if log_cb: log_cb(f"  共 {len(pdf.pages)} 頁")
+        for pn, page in enumerate(pdf.pages, 1):
             if log_cb: log_cb(f"  解析第 {pn} 頁...")
-            header, page_strategy = _extract_page_mixed(page, wm, skip_dup, header, all_rows)
+            page_rows, page_strategy = _extract_page_v2(page)
             strategy = page_strategy
+            for row in page_rows:
+                if _is_wm(row): continue
+                all_rows.append(row)
+
+    # 標題偵測與雙層合併（整份文件統一處理）
+    all_rows = _find_header_and_merge(all_rows)
+
+    # 移除重複標題（第2頁以後的標題列）
+    if skip_dup and len(all_rows) > 1:
+        hdr = all_rows[0] if all_rows else []
+        deduped = [hdr] if hdr else []
+        for row in all_rows[1:]:
+            if [clean(v) for v in row] == [clean(v) for v in hdr] and sum(1 for v in hdr if clean(v)) >= 3:
+                continue
+            deduped.append(row)
+        all_rows = deduped
 
     if settings.get("fill_dates", True):
         all_rows = _fill_date_cols(all_rows)
@@ -493,60 +538,14 @@ def convert(pdf_path, out_path, settings, log_cb=None):
 #  比對核心
 # ════════════════════════════════════════════════════════
 
-def _find_real_header(rows):
-    """
-    通用標題列偵測：
-    1. 找第一個欄位數 >= 3 的列作為主標題
-    2. 若下一列也有多欄且看起來是子標題（有文字、非純數字），合併成一列
-    回傳 (header_row_index, merged_header)
-    """
-    if not rows: return 0, []
-    # 找第一個有 >=3 個有值欄位的列
-    hdr_idx=0
-    for i,row in enumerate(rows):
-        filled=[v for v in row if clean(v)]
-        if len(filled)>=3:
-            hdr_idx=i; break
-    r0=[clean(v) for v in rows[hdr_idx]]
-    # 檢查下一列是否為子標題
-    if hdr_idx+1<len(rows):
-        r1=[clean(v) for v in rows[hdr_idx+1]]
-        r1_text=sum(1 for v in r1 if v and not v.replace(".","").replace("-","").isdigit())
-        r0_empty=sum(1 for v in r0 if not v)
-        if r1_text>=2 and r0_empty>=2:
-            # 合併雙層標題：子標題優先填入空欄
-            merged=[]
-            for ci in range(max(len(r0),len(r1))):
-                v0=r0[ci] if ci<len(r0) else ""
-                v1=r1[ci] if ci<len(r1) else ""
-                if v0 and v1 and v0!=v1: merged.append(v1)
-                elif v0: merged.append(v0)
-                elif v1: merged.append(v1)
-                else: merged.append(f"欄{ci+1}")
-            return hdr_idx, merged
-    return hdr_idx, r0
 
-def _merge_double_header(rows):
-    """重組資料列：找到真正的標題列，移除標題前的說明文字，合併雙層標題"""
-    hdr_idx, merged_hdr = _find_real_header(rows)
-    if not merged_hdr: return rows
-    # 判斷是否有雙層標題（下一列也是標題的一部分）
-    next_is_sub = False
-    if hdr_idx+1<len(rows):
-        r1=[clean(v) for v in rows[hdr_idx+1]]
-        r1_text=sum(1 for v in r1 if v and not v.replace(".","").replace("-","").isdigit())
-        r0=[clean(v) for v in rows[hdr_idx]]
-        r0_empty=sum(1 for v in r0 if not v)
-        next_is_sub=(r1_text>=2 and r0_empty>=2)
-    skip_to = hdr_idx+2 if next_is_sub else hdr_idx+1
-    return [merged_hdr] + rows[skip_to:]
 
 def load_table_from_file(path, settings, log_cb=None):
     ext=os.path.splitext(path)[1].lower()
     if ext==".pdf":
         if log_cb: log_cb(f"  轉換 PDF：{os.path.basename(path)}")
         table,_=convert(path, None, settings, log_cb=log_cb)
-        return _merge_double_header(table)
+        return _find_header_and_merge(table)
     elif ext in (".xlsx",".xls"):
         if log_cb: log_cb(f"  載入 Excel：{os.path.basename(path)}")
         wb=_load_wb(path, data_only=True)
@@ -555,7 +554,7 @@ def load_table_from_file(path, settings, log_cb=None):
         for row in ws.iter_rows(values_only=True):
             r=[clean(v) for v in row]
             if any(r): rows.append(r)
-        return _merge_double_header(rows)
+        return _find_header_and_merge(rows)
     else:
         raise ValueError(f"不支援的格式：{ext}")
 
@@ -1280,16 +1279,22 @@ class App(tk.Tk):
     def open_preview(self):
         if not self.pdf_files: messagebox.showwarning("提示","請先新增 PDF！"); return
         sel=self.listbox.curselection()
-        pdf=self.pdf_files[sel[0] if sel else 0]
+        # 若有選中多個或全部，逐一預覽；若只有一個或沒選中，預覽第一個
+        if sel:
+            indices=list(sel)
+        else:
+            indices=[0]
         settings=self._get_settings()
-        self.log(f"載入預覽：{os.path.basename(pdf)}")
-        def _load():
-            try:
-                table,strategy=convert(pdf,None,settings,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
-                self.after(0,lambda:PreviewWin(self,pdf,table,strategy,settings))
-            except Exception as e:
-                self.after(0,lambda:self.log(f"預覽失敗：{e}","err"))
-        threading.Thread(target=_load,daemon=True).start()
+        for idx in indices:
+            pdf=self.pdf_files[idx]
+            self.log(f"載入預覽：{os.path.basename(pdf)}")
+            def _load(p=pdf):
+                try:
+                    table,strategy=convert(p,None,settings,log_cb=lambda m:self.after(0,lambda m=m:self.log(m)))
+                    self.after(0,lambda p=p,t=table,s=strategy:PreviewWin(self,p,t,s,settings))
+                except Exception as e:
+                    self.after(0,lambda e=e:self.log(f"預覽失敗：{e}","err"))
+            threading.Thread(target=_load,daemon=True).start()
 
     def start_convert(self):
         if self.running: return
