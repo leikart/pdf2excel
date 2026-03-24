@@ -483,29 +483,53 @@ def convert(pdf_path, out_path, settings, log_cb=None):
 #  比對核心
 # ════════════════════════════════════════════════════════
 
+def _find_real_header(rows):
+    """
+    通用標題列偵測：
+    1. 找第一個欄位數 >= 3 的列作為主標題
+    2. 若下一列也有多欄且看起來是子標題（有文字、非純數字），合併成一列
+    回傳 (header_row_index, merged_header)
+    """
+    if not rows: return 0, []
+    # 找第一個有 >=3 個有值欄位的列
+    hdr_idx=0
+    for i,row in enumerate(rows):
+        filled=[v for v in row if clean(v)]
+        if len(filled)>=3:
+            hdr_idx=i; break
+    r0=[clean(v) for v in rows[hdr_idx]]
+    # 檢查下一列是否為子標題
+    if hdr_idx+1<len(rows):
+        r1=[clean(v) for v in rows[hdr_idx+1]]
+        r1_text=sum(1 for v in r1 if v and not v.replace(".","").replace("-","").isdigit())
+        r0_empty=sum(1 for v in r0 if not v)
+        if r1_text>=2 and r0_empty>=2:
+            # 合併雙層標題：子標題優先填入空欄
+            merged=[]
+            for ci in range(max(len(r0),len(r1))):
+                v0=r0[ci] if ci<len(r0) else ""
+                v1=r1[ci] if ci<len(r1) else ""
+                if v0 and v1 and v0!=v1: merged.append(v1)
+                elif v0: merged.append(v0)
+                elif v1: merged.append(v1)
+                else: merged.append(f"欄{ci+1}")
+            return hdr_idx, merged
+    return hdr_idx, r0
+
 def _merge_double_header(rows):
-    """
-    通用雙層標題合併：
-    若第0列某欄為空、第1列有值，且第1列其他欄也有值 → 判定為雙層標題
-    自動合併成單列標題
-    """
-    if len(rows)<2: return rows
-    r0=[clean(v) for v in rows[0]]
-    r1=[clean(v) for v in rows[1]]
-    # 判斷是否為雙層標題：第1列有值且不全是數字/資料
-    r1_has_text=sum(1 for v in r1 if v and not v.replace(".","").replace("-","").isdigit())
-    r0_empty_count=sum(1 for v in r0 if not v)
-    if r1_has_text>=2 and r0_empty_count>=2:
-        merged=[]
-        for ci in range(max(len(r0),len(r1))):
-            v0=r0[ci] if ci<len(r0) else ""
-            v1=r1[ci] if ci<len(r1) else ""
-            if v0 and v1 and v0!=v1: merged.append(v1)  # 子標題優先
-            elif v0: merged.append(v0)
-            elif v1: merged.append(v1)
-            else: merged.append(f"欄{ci+1}")
-        return [merged]+rows[2:]
-    return rows
+    """重組資料列：找到真正的標題列，移除標題前的說明文字，合併雙層標題"""
+    hdr_idx, merged_hdr = _find_real_header(rows)
+    if not merged_hdr: return rows
+    # 判斷是否有雙層標題（下一列也是標題的一部分）
+    next_is_sub = False
+    if hdr_idx+1<len(rows):
+        r1=[clean(v) for v in rows[hdr_idx+1]]
+        r1_text=sum(1 for v in r1 if v and not v.replace(".","").replace("-","").isdigit())
+        r0=[clean(v) for v in rows[hdr_idx]]
+        r0_empty=sum(1 for v in r0 if not v)
+        next_is_sub=(r1_text>=2 and r0_empty>=2)
+    skip_to = hdr_idx+2 if next_is_sub else hdr_idx+1
+    return [merged_hdr] + rows[skip_to:]
 
 def load_table_from_file(path, settings, log_cb=None):
     ext=os.path.splitext(path)[1].lower()
