@@ -175,7 +175,10 @@ def parse_auto(pdf_path, settings, log_cb=None):
 
 
 def _fill_date_cols(rows):
-    """把日期/星期欄的空白格填入上一列的值（向下填充）"""
+    """
+    把日期/星期欄的空白格填入上一列的值（向下填充）。
+    只對「錨點欄（第0欄）有值」的列填充，避免把日期錯誤填進合計列或說明文字列。
+    """
     if len(rows) < 2: return rows
     header = rows[0]
     # 找日期欄和星期欄的索引
@@ -183,19 +186,25 @@ def _fill_date_cols(rows):
     for ci, h in enumerate(header):
         if any(k in str(h) for k in ["日期","星期","週","week","date"]):
             date_cols.append(ci)
-    if not date_cols: date_cols = [1, 2]  # 預設欄1和欄2
+    if not date_cols:
+        return rows  # 找不到日期/星期欄，不做填充直接回傳
     last_vals = {ci: "" for ci in date_cols}
     result = [header]
     for row in rows[1:]:
         new_row = list(row)
+        # 錨點欄（第0欄）的值
+        anchor_val = str(new_row[0]).strip() if new_row else ""
         for ci in date_cols:
             val = new_row[ci] if ci < len(new_row) else ""
-            if val.strip():
-                last_vals[ci] = val.strip()
-            elif last_vals[ci]:
-                # 空白 → 填入上一列的值
+            val_str = str(val).strip() if val else ""
+            if val_str:
+                # 有值：更新記憶
+                last_vals[ci] = val_str
+            elif last_vals[ci] and anchor_val:
+                # 空白 + 錨點欄有值 → 填入上一列的值
                 while len(new_row) <= ci: new_row.append("")
                 new_row[ci] = last_vals[ci]
+            # 錨點欄空白（合計列、說明文字）→ 不填充，保持空白
         result.append(new_row)
     return result
 
