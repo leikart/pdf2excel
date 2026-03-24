@@ -170,7 +170,8 @@ def parse_auto(pdf_path, settings, log_cb=None):
             header, page_strategy = _extract_page_mixed(page, wm, skip_dup, header, all_rows)
             strategy = page_strategy
 
-    all_rows = _fill_date_cols(all_rows)
+    if settings.get("fill_dates", True):
+        all_rows = _fill_date_cols(all_rows)
     return all_rows, strategy
 
 
@@ -360,20 +361,24 @@ def _merge_tables(all_tables, settings):
 def detect_merges(table, merge_cols=None):
     """
     偵測需要合併的欄位範圍。
-    merge_cols: 指定欄位索引清單，只合併這些欄（預設只合併出貨日期=1和星期=2）
-    若為 None 且無法判斷，預設只合併索引1和2。
+    只合併標題列中含有「日期」「星期」等關鍵字的欄位。
+    找不到這類欄位時回傳空字典（不合併任何欄位）。
+    merge_cols: 可手動指定欄位索引清單，覆蓋自動偵測結果。
     """
     if len(table)<2: return {}
     data=table[1:]; info={}
-    # 預設只合併出貨日期（欄1）和星期（欄2）
+
     if merge_cols is None:
-        # 嘗試從標題判斷日期/星期欄位
+        # 從標題列找日期/星期欄，找不到就不合併
         header=table[0]
         date_cols=[]
         for ci,h in enumerate(header):
             if any(k in str(h) for k in ["日期","星期","週","week","date","Date"]):
                 date_cols.append(ci)
-        merge_cols=date_cols if date_cols else [1,2]
+        if not date_cols:
+            return {}  # 沒有日期欄 → 不合併任何欄位
+        merge_cols=date_cols
+
     for ci in merge_cols:
         ranges=[]; i=0
         while i<len(data):
@@ -382,8 +387,8 @@ def detect_merges(table, merge_cols=None):
                 j=i+1
                 while j<len(data):
                     nv=data[j][ci] if ci<len(data[j]) else ""
-                    if nv=="": j+=1   # 空白代表同一天，繼續合併
-                    else: break        # 有新值代表換天，停止
+                    if nv=="": j+=1   # 空白代表同一組，繼續合併
+                    else: break        # 有新值代表換組，停止
                 if j-i>1: ranges.append((i,j-1))
                 i=j
             else: i+=1
@@ -466,7 +471,9 @@ def convert(pdf_path, out_path, settings, log_cb=None):
             if log_cb: log_cb("  表格偵測結果少，切換座標模式...")
             table,strategy=parse_coords(pdf_path,settings,log_cb)
     if log_cb: log_cb(f"  策略：{strategy}，{len(table)} 列（含標題）")
-    mi=detect_merges(table)
+    # 依文件類型決定是否合併儲存格
+    merge_dates=settings.get("merge_dates", True)
+    mi=detect_merges(table) if merge_dates else {}
     if out_path: write_excel(table,mi,out_path)
     return table, strategy
 
@@ -529,9 +536,36 @@ class App(tk.Tk):
         self.count_lbl=tk.Label(right,text="尚未選擇檔案",font=("Segoe UI",11),bg=BG,fg=TEXT2)
         self.count_lbl.pack(anchor="w",pady=(2,8))
 
-        # 進階設定
-        adv=tk.LabelFrame(right,text=" ⚙  進階設定 ",font=("Segoe UI",11,"bold"),bg=BG,fg=TEXT2,bd=1,relief="groove")
-        adv.pack(fill="x",pady=(0,8))
+        # ── 文件類型選擇 ──────────────────────────
+        tk.Label(right,text="文件類型",font=("Segoe UI",12,"bold"),bg=BG,fg=TEXT).pack(anchor="w",pady=(0,4))
+        self.doc_type=tk.StringVar(value="other")
+        type_frame=tk.Frame(right,bg=BG); type_frame.pack(fill="x",pady=(0,10))
+        for val,lbl,tip,clr in [
+            ("shipment","📦  出貨順序","自動過濾浮水印・日期合併・填充",ACCENT),
+            ("other",   "📄  其他",    "單純轉檔，不加額外處理",         CARD2),
+        ]:
+            f=tk.Frame(type_frame,bg=BG); f.pack(side="left",fill="x",expand=True,padx=(0,6))
+            rb=tk.Radiobutton(f,text=lbl,variable=self.doc_type,value=val,
+                              bg=clr,fg=TEXT,selectcolor=clr,activebackground=clr,
+                              font=("Segoe UI",11,"bold"),indicatoron=False,
+                              relief="flat",padx=8,pady=8,cursor="hand2",
+                              command=self._on_doc_type)
+            rb.pack(fill="x")
+            tk.Label(f,text=tip,font=("Segoe UI",8),bg=BG,fg=TEXT2).pack(anchor="w",pady=(2,0))
+
+        # ── 進階設定（可展開）────────────────────
+        self._adv_open=tk.BooleanVar(value=False)
+        adv_hdr=tk.Frame(right,bg=BG2,cursor="hand2")
+        adv_hdr.pack(fill="x",pady=(0,4))
+        self._adv_arrow=tk.Label(adv_hdr,text="▶  進階設定",font=("Segoe UI",11,"bold"),
+                                  bg=BG2,fg=TEXT2,cursor="hand2")
+        self._adv_arrow.pack(side="left",padx=10,pady=6)
+        tk.Label(adv_hdr,text="（選填）",font=("Segoe UI",9),bg=BG2,fg=TEXT2).pack(side="left")
+        adv_hdr.bind("<Button-1>",self._toggle_adv)
+        self._adv_arrow.bind("<Button-1>",self._toggle_adv)
+
+        adv=tk.Frame(right,bg=BG)
+        self._adv_frame=adv  # 記住用來 show/hide
 
         # 解析模式
         tk.Label(adv,text="解析模式",font=("Segoe UI",11),bg=BG,fg=TEXT2).pack(anchor="w",padx=8,pady=(8,2))
@@ -612,15 +646,50 @@ class App(tk.Tk):
             self.bounds_frame.pack_forget()
             self.merge_frame.pack_forget()
 
+    def _on_doc_type(self):
+        """切換文件類型時自動套用對應的預設設定"""
+        t=self.doc_type.get()
+        if t=="shipment":
+            # 出貨順序：預設開啟刪除重複標題、保持其他設定
+            self.skip_dup.set(True)
+        else:
+            # 其他：清除浮水印關鍵字，不做特殊處理
+            self.wm_var.set("")
+            self.skip_dup.set(True)
+
+    def _toggle_adv(self, event=None):
+        """展開/收合進階設定"""
+        if self._adv_open.get():
+            self._adv_frame.pack_forget()
+            self._adv_arrow.config(text="▶  進階設定")
+            self._adv_open.set(False)
+        else:
+            self._adv_frame.pack(fill="x",pady=(0,8))
+            self._adv_arrow.config(text="▼  進階設定")
+            self._adv_open.set(True)
+
     def _get_settings(self):
-        return {
+        doc_type=self.doc_type.get()
+        base={
             "mode": self.mode_var.get(),
             "watermark_keywords": self.wm_var.get(),
             "anchor_col": self.anchor_var.get().strip() or "0",
             "skip_duplicate_header": self.skip_dup.get(),
             "col_bounds": self.bounds_var.get(),
             "merge_col_range": self.merge_range_var.get(),
+            "doc_type": doc_type,
         }
+        if doc_type=="other":
+            # 其他模式：關閉日期填充和合併（忽略 watermark_keywords 設定）
+            base["watermark_keywords"]=""
+            base["skip_duplicate_header"]=False
+            base["fill_dates"]=False
+            base["merge_dates"]=False
+        else:
+            # 出貨順序：啟用所有處理
+            base["fill_dates"]=True
+            base["merge_dates"]=True
+        return base
 
     def add_files(self):
         fs=filedialog.askopenfilenames(title="選擇 PDF",filetypes=[("PDF","*.pdf"),("所有","*.*")])
